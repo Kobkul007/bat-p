@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileSpreadsheet, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, X, Download, LogOut } from 'lucide-react';
+import { FileSpreadsheet, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, X, Download, LogOut, ShieldAlert } from 'lucide-react';
 import { GoogleSheetsConfig, MatchHistoryItem, PlayerPair } from '../types/badminton';
 import { googleSheetsService } from '../services/googleSheets';
 
@@ -25,29 +25,50 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [customSheetInput, setCustomSheetInput] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
+  const [popupBlocked, setPopupBlocked] = useState(false);
 
   if (!isOpen) return null;
 
   const isAuth = googleSheetsService.isAuthenticated();
   const userEmail = googleSheetsService.getUserEmail() || config.userEmail;
 
-  const handleAuthorize = async () => {
-    setLoading(true);
+  /**
+   * Authorize handler called synchronously in the user gesture
+   */
+  const handleAuthorize = () => {
     setError(null);
     setSuccessMsg(null);
-    try {
-      await googleSheetsService.authorize();
-      const email = googleSheetsService.getUserEmail();
-      onUpdateConfig({
-        ...config,
-        userEmail: email || config.userEmail,
+    setPopupBlocked(false);
+    setLoading(true);
+
+    googleSheetsService
+      .authorize()
+      .then(() => {
+        const email = googleSheetsService.getUserEmail();
+        onUpdateConfig({
+          ...config,
+          userEmail: email || config.userEmail,
+        });
+        setSuccessMsg('เชื่อมต่อบัญชี Google สำเร็จเรียบร้อย');
+        setPopupBlocked(false);
+        setError(null);
+      })
+      .catch((err: any) => {
+        const isBlocked =
+          err?.isPopupBlocked ||
+          err?.message?.includes('popup') ||
+          err?.message?.includes('ป๊อปอัป');
+
+        if (isBlocked) {
+          setPopupBlocked(true);
+          setError('เบราว์เซอร์บล็อกหน้าต่างป๊อปอัปเข้าสู่ระบบ (Popup Blocked)');
+        } else {
+          setError(err?.message || 'การยืนยันตัวตนล้มเหลว กรุณาลองใหม่อีกครั้ง');
+        }
+      })
+      .finally(() => {
+        setLoading(false);
       });
-      setSuccessMsg('เชื่อมต่อบัญชี Google สำเร็จเรียบร้อย');
-    } catch (err: any) {
-      setError(err.message || 'การยืนยันตัวตนล้มเหลว กรุณาอนุญาตป๊อปอัปในเบราว์เซอร์');
-    } finally {
-      setLoading(false);
-    }
   };
 
   const handleDisconnect = () => {
@@ -57,9 +78,15 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
       userEmail: null,
     });
     setSuccessMsg('ยกเลิกการเชื่อมต่อบัญชี Google แล้ว');
+    setPopupBlocked(false);
   };
 
   const handleCreateNewSheet = async () => {
+    if (!googleSheetsService.isAuthenticated()) {
+      handleAuthorize();
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setSuccessMsg(null);
@@ -83,6 +110,9 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 
       setSuccessMsg(`สร้างสเปรดชีตใหม่: "${sheet.title}" เรียบร้อยแล้ว!`);
     } catch (err: any) {
+      if (err?.isPopupBlocked || err?.message?.includes('popup')) {
+        setPopupBlocked(true);
+      }
       setError(err.message || 'ไม่สามารถสร้างสเปรดชีตได้');
     } finally {
       setLoading(false);
@@ -123,6 +153,9 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
       });
       setSuccessMsg(result.message || 'ซิงค์ข้อมูลกับ Google Sheets เรียบร้อย');
     } catch (err: any) {
+      if (err?.isPopupBlocked || err?.message?.includes('popup')) {
+        setPopupBlocked(true);
+      }
       setError(err.message || 'การซิงค์ข้อมูลล้มเหลว');
     } finally {
       setLoading(false);
@@ -163,10 +196,47 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
         </div>
 
         {/* Alerts */}
-        {error && (
+        {error && !popupBlocked && (
           <div className="mt-3.5 p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
             <span>{error}</span>
+          </div>
+        )}
+
+        {/* Popup Blocked Specific Friendly Guide */}
+        {popupBlocked && (
+          <div className="mt-3.5 p-4 rounded-2xl bg-amber-50/90 border border-amber-200/90 text-amber-900 text-xs space-y-2.5">
+            <div className="flex items-center gap-2 font-semibold text-amber-950">
+              <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>เบราว์เซอร์บล็อกหน้าต่างป๊อปอัป (Popup Blocked)</span>
+            </div>
+            <p className="text-neutral-700 leading-relaxed">
+              เบราว์เซอร์บล็อกหน้าต่างป๊อปอัปสำหรับลงชื่อเข้าใช้ Google กรุณากดปุ่มด้านล่างเพื่อเปิดหน้าต่างอีกครั้ง หรืออนุญาตป๊อปอัปที่แถบที่อยู่เว็บ (URL Bar):
+            </p>
+            <div className="bg-white/80 p-2.5 rounded-xl border border-amber-200/60 text-[11px] text-neutral-600 space-y-1">
+              <div>• <strong>Chrome / Edge:</strong> แตะไอคอนป๊อปอัปถูกบล็อกที่ขวาบนของแถบ URL &gt; เลือก "อนุญาตเสมอ"</div>
+              <div>• <strong>Safari / iPhone:</strong> การตั้งค่า (Settings) &gt; Safari &gt; ปิด "บล็อกหน้าต่างที่แสดงขึ้นมา"</div>
+            </div>
+            <div className="pt-1 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleAuthorize}
+                disabled={loading}
+                className="px-4 py-2 rounded-full text-xs font-semibold bg-[#1d1d1f] hover:bg-neutral-800 text-white shadow-sm transition active:scale-95 cursor-pointer"
+              >
+                {loading ? 'กำลังเปิดหน้าต่าง...' : 'แตะเพื่อเปิดหน้าต่างเข้าสู่ระบบอีกครั้ง'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPopupBlocked(false);
+                  setShowCustomInput(true);
+                }}
+                className="px-3.5 py-2 rounded-full text-xs font-medium bg-white hover:bg-neutral-100 text-neutral-700 border border-neutral-200 shadow-xs transition"
+              >
+                ใช้ลิงก์ชีตเดิมแทน (ไม่ต้องเปิดป๊อปอัป)
+              </button>
+            </div>
           </div>
         )}
 
@@ -205,7 +275,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
                 disabled={loading}
                 className="px-4 py-2 text-xs font-semibold rounded-full bg-[#1d1d1f] text-white hover:bg-neutral-800 transition shadow-sm"
               >
-                เข้าสู่ระบบ Google
+                {loading ? 'กำลังเชื่อมต่อ...' : 'เข้าสู่ระบบ Google'}
               </button>
             )}
           </div>
@@ -290,7 +360,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
                   onClick={() => setShowCustomInput(!showCustomInput)}
                   className="px-4 py-2.5 rounded-full text-xs font-medium bg-white text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100 border border-neutral-200/80 shadow-sm transition"
                 >
-                  ใช้ลิงก์ชีตเดิม
+                  ใช้ลิงก์ชีตเดิม (ไม่ต้องเปิดป๊อปอัป)
                 </button>
               </div>
 
@@ -316,7 +386,7 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
 
           {/* Offline CSV Fallback */}
           <div className="pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500">
-            <span>สำรองข้อมูลลงเครื่อง</span>
+            <span>สำรองข้อมูลลงเครื่องโดยตรง</span>
             <button
               onClick={handleDownloadCsv}
               className="flex items-center gap-1.5 text-neutral-700 hover:text-[#1d1d1f] font-medium"
