@@ -1,7 +1,17 @@
-import { AppState, GoogleSheetsConfig } from '../types/badminton';
+import { AppState, GoogleSheetsConfig, AdminAuthConfig } from '../types/badminton';
 
 const STORAGE_KEY = 'smash_queue_badminton_app_state_v1';
 const SHEETS_CONFIG_KEY = 'smash_queue_sheets_config_v1';
+const ADMIN_CONFIG_KEY = 'smash_queue_admin_auth_config_v1';
+
+export const DEFAULT_CREATOR_EMAIL = 'kobkul.works00@gmail.com';
+
+export const INITIAL_ADMIN_CONFIG: AdminAuthConfig = {
+  creatorEmail: DEFAULT_CREATOR_EMAIL,
+  allowedEmails: [
+    'kobkul.works00@gmail.com',
+  ],
+};
 
 export const INITIAL_STATE: AppState = {
   court: {
@@ -123,4 +133,34 @@ export function saveSheetsConfig(config: GoogleSheetsConfig) {
   } catch {
     // ignore
   }
+}
+
+export function loadAdminConfig(): AdminAuthConfig {
+  try {
+    const raw = localStorage.getItem(ADMIN_CONFIG_KEY);
+    if (!raw) return INITIAL_ADMIN_CONFIG;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.creatorEmail || !Array.isArray(parsed.allowedEmails)) {
+      return INITIAL_ADMIN_CONFIG;
+    }
+    return parsed;
+  } catch {
+    return INITIAL_ADMIN_CONFIG;
+  }
+}
+
+export function saveAdminConfig(config: AdminAuthConfig) {
+  try {
+    localStorage.setItem(ADMIN_CONFIG_KEY, JSON.stringify(config));
+  } catch {
+    // ignore
+  }
+}
+
+export function isUserAuthorized(email: string | null | undefined, config?: AdminAuthConfig): boolean {
+  if (!email) return false;
+  const cfg = config || loadAdminConfig();
+  const trimmed = email.trim().toLowerCase();
+  if (cfg.creatorEmail && trimmed === cfg.creatorEmail.trim().toLowerCase()) return true;
+  return cfg.allowedEmails.some((e) => e.trim().toLowerCase() === trimmed);
 }

@@ -1,7 +1,8 @@
 import { MatchHistoryItem, PlayerPair } from '../types/badminton';
+import { isUserAuthorized } from '../utils/storage';
 
 export const OAUTH_CLIENT_ID = '68205401171-sdkp7mromp8ktk8st56qvh4nb7ish5gt.apps.googleusercontent.com';
-export const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
+export const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/userinfo.email email openid profile';
 
 declare global {
   interface Window {
@@ -29,6 +30,8 @@ interface StoredAuth {
   accessToken: string;
   expiresAt: number;
   userEmail?: string;
+  userName?: string;
+  userPicture?: string;
 }
 
 class GoogleSheetsService {
@@ -36,6 +39,8 @@ class GoogleSheetsService {
   private currentAccessToken: string | null = null;
   private tokenExpiresAt: number = 0;
   private userEmail: string | null = null;
+  private userName: string | null = null;
+  private userPicture: string | null = null;
 
   private pendingResolve: ((token: string) => void) | null = null;
   private pendingReject: ((err: any) => void) | null = null;
@@ -65,6 +70,8 @@ class GoogleSheetsService {
           this.currentAccessToken = parsed.accessToken;
           this.tokenExpiresAt = parsed.expiresAt;
           this.userEmail = parsed.userEmail || null;
+          this.userName = parsed.userName || null;
+          this.userPicture = parsed.userPicture || null;
         } else {
           localStorage.removeItem('smash_queue_google_auth');
         }
@@ -74,15 +81,19 @@ class GoogleSheetsService {
     }
   }
 
-  private saveToken(token: string, expiresInSeconds: number, email?: string) {
+  private saveToken(token: string, expiresInSeconds: number, email?: string, name?: string, picture?: string) {
     this.currentAccessToken = token;
     this.tokenExpiresAt = Date.now() + expiresInSeconds * 1000;
     if (email) this.userEmail = email;
+    if (name) this.userName = name;
+    if (picture) this.userPicture = picture;
 
     const authData: StoredAuth = {
       accessToken: token,
       expiresAt: this.tokenExpiresAt,
       userEmail: this.userEmail || undefined,
+      userName: this.userName || undefined,
+      userPicture: this.userPicture || undefined,
     };
     localStorage.setItem('smash_queue_google_auth', JSON.stringify(authData));
   }
@@ -95,11 +106,35 @@ class GoogleSheetsService {
     return this.userEmail;
   }
 
+  public getUserName(): string | null {
+    return this.userName;
+  }
+
+  public getUserPicture(): string | null {
+    return this.userPicture;
+  }
+
   public disconnect() {
     this.currentAccessToken = null;
     this.tokenExpiresAt = 0;
     this.userEmail = null;
+    this.userName = null;
+    this.userPicture = null;
     localStorage.removeItem('smash_queue_google_auth');
+  }
+
+  public setManualAuth(email: string, name?: string) {
+    this.userEmail = email;
+    this.userName = name || email.split('@')[0];
+    this.currentAccessToken = `manual-${Date.now()}`;
+    this.tokenExpiresAt = Date.now() + 3600 * 24 * 1000;
+    const authData: StoredAuth = {
+      accessToken: this.currentAccessToken,
+      expiresAt: this.tokenExpiresAt,
+      userEmail: this.userEmail,
+      userName: this.userName,
+    };
+    localStorage.setItem('smash_queue_google_auth', JSON.stringify(authData));
   }
 
   /**
@@ -126,6 +161,8 @@ class GoogleSheetsService {
 
           const expiresIn = response.expires_in || 3600;
           let email: string | undefined;
+          let name: string | undefined;
+          let picture: string | undefined;
 
           try {
             const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -134,12 +171,14 @@ class GoogleSheetsService {
             if (res.ok) {
               const info = await res.json();
               email = info.email;
+              name = info.name;
+              picture = info.picture;
             }
           } catch {
             // optional userinfo
           }
 
-          this.saveToken(response.access_token, expiresIn, email);
+          this.saveToken(response.access_token, expiresIn, email, name, picture);
 
           if (this.pendingResolve) {
             this.pendingResolve(response.access_token);
@@ -178,6 +217,53 @@ class GoogleSheetsService {
   }
 
   /**
+   * Directly triggers Google Login to authenticate the user and obtain email
+   */
+  public async loginWithGoogle(promptSelect = true): Promise<{ email: string; name?: string; picture?: string; token: string }> {
+    const ready = this.ensureClientInitialized();
+    if (!ready || !this.tokenClient) {
+      throw new Error('Google Identity Services กำลังโหลด กรุณารอสักครู่แล้วลองอีกครั้ง');
+    }
+
+    return new Promise((resolve, reject) => {
+      this.pendingResolve = async (token: string) => {
+        let email: string | undefined = this.userEmail || undefined;
+        let name: string | undefined = this.userName || undefined;
+        let picture: string | undefined = this.userPicture || undefined;
+
+        if (!email) {
+          try {
+            const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+              const info = await res.json();
+              email = info.email || undefined;
+              name = info.name || undefined;
+              picture = info.picture || undefined;
+              this.saveToken(token, 3600, email, name, picture);
+            }
+          } catch (e) {
+            console.warn('Failed to fetch userinfo:', e);
+          }
+        }
+
+        resolve({ email: email || '', name: name || undefined, picture: picture || undefined, token });
+      };
+
+      this.pendingReject = reject;
+
+      try {
+        this.tokenClient!.requestAccessToken({ prompt: promptSelect ? 'select_account' : '' });
+      } catch (err) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        reject(err);
+      }
+    });
+  }
+
+  /**
    * Request Google OAuth token. Must be initiated during a user click gesture.
    */
   public authorize(): Promise<string> {
@@ -211,6 +297,9 @@ class GoogleSheetsService {
    */
   public async createSessionSpreadsheet(title?: string): Promise<{ id: string; url: string; title: string }> {
     const token = await this.authorize();
+    if (!isUserAuthorized(this.getUserEmail())) {
+      throw new Error('ไม่มีสิทธิ์เข้าถึง Google Sheets: เฉพาะแอดมินหรือผู้ได้รับสิทธิ์เท่านั้น');
+    }
     const sheetTitle = title || `คิวแบดมินตัน ครองคอร์ต - ${new Date().toLocaleDateString('th-TH')}`;
 
     const createPayload = {
@@ -309,6 +398,9 @@ class GoogleSheetsService {
    * Append a single completed match record to Google Sheet
    */
   public async appendMatchRecord(spreadsheetId: string, item: MatchHistoryItem, matchNumber: number): Promise<boolean> {
+    if (!isUserAuthorized(this.getUserEmail())) {
+      return false;
+    }
     const token = await this.authorize();
 
     const durationText = item.durationSeconds
@@ -357,6 +449,9 @@ class GoogleSheetsService {
     allPairs: PlayerPair[]
   ): Promise<{ success: boolean; message: string }> {
     const token = await this.authorize();
+    if (!isUserAuthorized(this.getUserEmail())) {
+      throw new Error('ไม่มีสิทธิ์เข้าถึง Google Sheets: เฉพาะแอดมินหรือผู้ได้รับสิทธิ์เท่านั้น');
+    }
 
     // 1. Sync Match History
     const historyRows = [

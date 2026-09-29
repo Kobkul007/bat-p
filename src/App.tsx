@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import confetti from 'canvas-confetti';
 import { CourtState, PlayerPair, AppState, MatchHistoryItem, GoogleSheetsConfig } from './types/badminton';
-import { loadAppState, saveAppState, loadSheetsConfig, saveSheetsConfig, INITIAL_STATE } from './utils/storage';
+import { loadAppState, saveAppState, loadSheetsConfig, saveSheetsConfig, INITIAL_STATE, isUserAuthorized, loadAdminConfig } from './utils/storage';
 import { sounds } from './services/soundEffects';
 import { googleSheetsService } from './services/googleSheets';
 import { Header } from './components/Header';
@@ -11,17 +11,39 @@ import { HistoryLog } from './components/HistoryLog';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { GoogleSheetsModal } from './components/GoogleSheetsModal';
 import { AdminDashboard } from './components/AdminDashboard';
-import { Users, History, Trophy, FileSpreadsheet, LayoutGrid, ShieldCheck } from 'lucide-react';
+import { MeetupGroupModal } from './components/MeetupGroupModal';
+import { MeetupSession } from './types/meetup';
+import { loadMeetupSession, saveMeetupSession } from './utils/meetupStorage';
+import { Users, History, Trophy, FileSpreadsheet, LayoutGrid, ShieldCheck, Lock, QrCode } from 'lucide-react';
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>(() => loadAppState());
   const [sheetsConfig, setSheetsConfig] = useState<GoogleSheetsConfig>(() => loadSheetsConfig());
+  const [meetupSession, setMeetupSession] = useState<MeetupSession>(() => loadMeetupSession());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(() => googleSheetsService.getUserEmail());
 
   // Modals
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState(false);
   const [isSheetsOpen, setIsSheetsOpen] = useState(false);
+  const [isMeetupOpen, setIsMeetupOpen] = useState(false);
   const [isAdminView, setIsAdminView] = useState(false);
+
+  // Sync auth email state periodically and on window storage
+  useEffect(() => {
+    const syncAuth = () => {
+      const email = googleSheetsService.getUserEmail();
+      setCurrentUserEmail((prev) => (prev !== email ? email : prev));
+    };
+    window.addEventListener('storage', syncAuth);
+    const timer = setInterval(syncAuth, 1000);
+    return () => {
+      window.removeEventListener('storage', syncAuth);
+      clearInterval(timer);
+    };
+  }, []);
+
+  const isSheetsAuthorized = isUserAuthorized(currentUserEmail, loadAdminConfig());
 
   // Mobile navigation tab ('court' | 'queue' | 'history' | 'all')
   const [mobileTab, setMobileTab] = useState<'court' | 'queue' | 'history' | 'all'>('court');
@@ -49,6 +71,10 @@ export default function App() {
   useEffect(() => {
     saveSheetsConfig(sheetsConfig);
   }, [sheetsConfig]);
+
+  useEffect(() => {
+    saveMeetupSession(meetupSession);
+  }, [meetupSession]);
 
   // Keyboard shortcut for Undo (Ctrl+Z or Cmd+Z)
   useEffect(() => {
@@ -128,12 +154,13 @@ export default function App() {
       const willForcedExit = winnerStreakAfter >= 2;
 
       // 1. Both teams increment totalMatches += 1
-      // Loser resets consecutiveWins = 0 and is pushed to tail of queue
+      // Loser resets consecutiveWins = 0 and is pushed to tail of queue (ahead of 2-game winner)
       const updatedLoser: PlayerPair = {
         ...loser,
         totalMatches: loser.totalMatches + 1,
         consecutiveWins: 0,
         status: 'waiting',
+        lastMatchResult: 'loss',
       };
 
       // Create snapshot for undoStack BEFORE applying changes
@@ -165,6 +192,7 @@ export default function App() {
           totalMatches: winner.totalMatches + 1,
           consecutiveWins: winnerStreakAfter,
           status: 'playing',
+          lastMatchResult: 'win',
         };
 
         const currentQueue = [...appState.queue];
@@ -194,20 +222,22 @@ export default function App() {
 
         sounds.playMatchWin();
         showToast(
-          `${winner.name} ชนะและครองคอร์ตต่อ (ชนะติด ${winnerStreakAfter}/2 เกม)! ${challenger ? `${challenger.name} ขึ้นมาเป็นผู้ท้าชิง` : 'กำลังรอผู้ท้าชิง'}`,
+          `${winner.name} ชนะ 1 ตา ครองคอร์ตต่อ! ${updatedLoser.name} (คนแพ้) ไปต่อคิวได้สิทธิ์ลงก่อนคนชนะ`,
           'success'
         );
       } else {
         // CASE B: winner.consecutiveWins >= 2 (Forced Exit)
+        // กฎ: ชนะ 2 ตาติดออก และหากใครแพ้จะได้ลงก่อนคนชนะ
         const updatedWinner: PlayerPair = {
           ...winner,
           totalMatches: winner.totalMatches + 1,
           consecutiveWins: 0,
           status: 'waiting',
+          lastMatchResult: 'king_exit',
         };
 
         // Both court slots vacated
-        // Loser pushed to tail first, Winner pushed behind loser
+        // คนแพ้ (updatedLoser) ต่อคิวก่อน เพื่อให้ได้ลงเล่นรอบถัดไปก่อนคนชนะ (updatedWinner)
         const queueWithBoth = [...appState.queue, updatedLoser, updatedWinner];
 
         // Dequeue up to 2 teams from the head of queue to start brand-new match
@@ -240,7 +270,7 @@ export default function App() {
         sounds.playKingCrowned();
 
         showToast(
-          `👑 ครบโควตา 2 เกม! ${winner.name} สลับออกไปต่อท้ายคิว เปิดสนามรอบใหม่`,
+          `👑 ${winner.name} ชนะครบ 2 ตาติดออกพัก! ${updatedLoser.name} (คนแพ้) ต่อคิวก่อนคนชนะ เพื่อได้ลงเล่นรอบถัดไป`,
           'success'
         );
       }
@@ -255,8 +285,8 @@ export default function App() {
         undoStack: updatedUndoStack,
       });
 
-      // Background Auto-sync to Google Sheets if connected
-      if (sheetsConfig.spreadsheetId && sheetsConfig.autoSync) {
+      // Background Auto-sync to Google Sheets if connected and authorized
+      if (sheetsConfig.spreadsheetId && sheetsConfig.autoSync && isUserAuthorized(googleSheetsService.getUserEmail(), loadAdminConfig())) {
         try {
           await googleSheetsService.appendMatchRecord(
             sheetsConfig.spreadsheetId,
@@ -556,6 +586,26 @@ export default function App() {
     showToast('สุ่มสลับลำดับคิวเรียบร้อย', 'info');
   };
 
+  /**
+   * Sort queue strictly by rule: Losers get to play before 2-game winners
+   */
+  const handleSortQueueByRule = () => {
+    if (appState.queue.length <= 1) return;
+    setAppState((prev) => {
+      // Sort rule: Teams that lost (lastMatchResult === 'loss') or waiting longer get placed ahead of 2-game winners (lastMatchResult === 'king_exit')
+      const sortedQueue = [...prev.queue].sort((a, b) => {
+        if (a.lastMatchResult === 'king_exit' && b.lastMatchResult !== 'king_exit') return 1;
+        if (b.lastMatchResult === 'king_exit' && a.lastMatchResult !== 'king_exit') return -1;
+        return 0;
+      });
+      return {
+        ...prev,
+        queue: sortedQueue,
+      };
+    });
+    showToast('จัดลำดับคิวตามกฎ: คนแพ้ได้ลงก่อนคนชนะ 2 ตาติด เรียบร้อย', 'success');
+  };
+
   const handleResetSession = () => {
     if (window.confirm('ต้องการรีเซ็ตข้อมูลคิวและคะแนนทั้งหมดกลับเป็นค่าเริ่มต้นหรือไม่?')) {
       setAppState(INITIAL_STATE);
@@ -580,6 +630,9 @@ export default function App() {
         onUndo={handleUndo}
         onOpenSheets={() => setIsSheetsOpen(true)}
         onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
+        onOpenMeetup={() => setIsMeetupOpen(true)}
+        meetupParticipantsCount={meetupSession.participants.length}
+        meetupMaxParticipants={meetupSession.maxParticipants}
         onResetSession={handleResetSession}
         soundEnabled={soundEnabled}
         onToggleSound={() => setSoundEnabled(!soundEnabled)}
@@ -587,6 +640,7 @@ export default function App() {
         sheetTitle={sheetsConfig.spreadsheetTitle}
         isAdminView={isAdminView}
         onToggleAdminView={() => setIsAdminView((prev) => !prev)}
+        isSheetsAuthorized={isSheetsAuthorized}
       />
 
       {/* Toast Notification */}
@@ -616,62 +670,67 @@ export default function App() {
             sheetsConfig={sheetsConfig}
             onOpenSheets={() => setIsSheetsOpen(true)}
             onBackToCourt={() => setIsAdminView(false)}
+            onOpenMeetup={() => setIsMeetupOpen(true)}
             showToast={showToast}
           />
         ) : (
           <>
-            {/* Mobile Apple-Style Segmented Tab Bar (Visible on mobile/tablet screens) */}
-            <div className="lg:hidden sticky top-14 sm:top-16 z-30 -mx-3 sm:-mx-6 px-3 sm:px-6 py-2 bg-[#f5f5f7]/95 backdrop-blur-md border-b border-black/[0.05]">
-              <div className="grid grid-cols-4 bg-neutral-200/80 p-1 rounded-2xl text-xs font-medium gap-1">
+            {/* Mobile Segmented View Bar (Mobile & Tablet) */}
+            <div className="lg:hidden sticky top-14 sm:top-16 z-30 -mx-3 sm:-mx-6 px-3 sm:px-6 py-2 bg-[#f5f5f7]/95 backdrop-blur-md border-b border-neutral-200/70">
+              <div className="grid grid-cols-4 bg-neutral-200/70 p-1 rounded-2xl text-xs font-semibold gap-1 max-w-md mx-auto">
                 <button
+                  type="button"
                   onClick={() => setMobileTab('court')}
                   className={`py-2 rounded-xl flex items-center justify-center gap-1.5 transition touch-manipulation active:scale-95 ${
                     mobileTab === 'court'
-                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      ? 'bg-white text-neutral-900 shadow-xs'
                       : 'text-neutral-600 hover:text-neutral-900'
                   }`}
                 >
-                  <span>🏸 คอร์ต</span>
+                  <span>🏸 คอร์ด</span>
                   {appState.court.status === 'ACTIVE' && (
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   )}
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => setMobileTab('queue')}
                   className={`py-2 rounded-xl flex items-center justify-center gap-1.5 transition touch-manipulation active:scale-95 ${
                     mobileTab === 'queue'
-                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      ? 'bg-white text-neutral-900 shadow-xs'
                       : 'text-neutral-600 hover:text-neutral-900'
                   }`}
                 >
                   <span>คิว</span>
-                  <span className="px-1.5 py-0.2 bg-neutral-200 text-neutral-700 rounded-full text-[10px] font-bold">
+                  <span className="font-mono px-1.5 py-0.2 bg-neutral-200 text-neutral-700 rounded-full text-[10px] font-bold">
                     {appState.queue.length}
                   </span>
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => setMobileTab('history')}
                   className={`py-2 rounded-xl flex items-center justify-center gap-1.5 transition touch-manipulation active:scale-95 ${
                     mobileTab === 'history'
-                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      ? 'bg-white text-neutral-900 shadow-xs'
                       : 'text-neutral-600 hover:text-neutral-900'
                   }`}
                 >
                   <span>ประวัติ</span>
                   {appState.historyLog.length > 0 && (
-                    <span className="px-1.5 py-0.2 bg-neutral-200 text-neutral-700 rounded-full text-[10px] font-bold">
+                    <span className="font-mono px-1.5 py-0.2 bg-neutral-200 text-neutral-700 rounded-full text-[10px] font-bold">
                       {appState.historyLog.length}
                     </span>
                   )}
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => setMobileTab('all')}
                   className={`py-2 rounded-xl flex items-center justify-center gap-1 transition touch-manipulation active:scale-95 ${
                     mobileTab === 'all'
-                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      ? 'bg-white text-neutral-900 shadow-xs'
                       : 'text-neutral-600 hover:text-neutral-900'
                   }`}
                 >
@@ -681,7 +740,7 @@ export default function App() {
             </div>
 
             {/* View Layout - Responsive for Mobile & Desktop */}
-            <div className="space-y-5">
+            <div className="space-y-4 sm:space-y-6">
               {/* Core Court Arena (Always on Desktop, conditional on Mobile) */}
               <div className={`${mobileTab === 'court' || mobileTab === 'all' ? 'block' : 'hidden lg:block'}`}>
                 <CourtView
@@ -696,7 +755,7 @@ export default function App() {
               </div>
 
               {/* Queue Management & Match History Split Layout */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-start">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
                 {/* Left Column: Challenger Queue & Resting Bench (7 cols) */}
                 <div className={`lg:col-span-7 ${mobileTab === 'queue' || mobileTab === 'all' ? 'block' : 'hidden lg:block'}`}>
                   <QueueManager
@@ -713,6 +772,7 @@ export default function App() {
                     onSeatPairDirectly={handleSeatPairDirectly}
                     onEditPairName={handleEditPairName}
                     onShuffleQueue={handleShuffleQueue}
+                    onSortQueueByRule={handleSortQueueByRule}
                   />
                 </div>
 
@@ -720,9 +780,15 @@ export default function App() {
                 <div className={`lg:col-span-5 ${mobileTab === 'history' || mobileTab === 'all' ? 'block' : 'hidden lg:block'}`}>
                   <HistoryLog
                     history={appState.historyLog}
-                    onExportCsv={() => googleSheetsService.downloadCsv(appState.historyLog, allCurrentPairs)}
+                    onExportCsv={() => {
+                      if (!isSheetsAuthorized) {
+                        showToast('การส่งออกข้อมูลจำกัดเฉพาะแอดมินหรือผู้ได้รับสิทธิ์เท่านั้น', 'warn');
+                        return;
+                      }
+                      googleSheetsService.downloadCsv(appState.historyLog, allCurrentPairs);
+                    }}
                     onOpenSheets={() => setIsSheetsOpen(true)}
-                    sheetsConnected={Boolean(sheetsConfig.spreadsheetId)}
+                    sheetsConnected={Boolean(sheetsConfig.spreadsheetId && isSheetsAuthorized)}
                   />
                 </div>
               </div>
@@ -731,40 +797,42 @@ export default function App() {
         )}
       </main>
 
-      {/* Mobile Floating Sticky Quick Status Bar when active & in Queue/History tab */}
+      {/* Mobile Floating Sticky Quick Status Bar when match active & viewing other tabs */}
       {!isAdminView && mobileTab !== 'court' && mobileTab !== 'all' && appState.court.status === 'ACTIVE' && appState.court.teamA && appState.court.teamB && (
-        <div className="lg:hidden fixed bottom-[calc(max(env(safe-area-inset-bottom),10px)+58px)] inset-x-3 z-30 animate-in fade-in slide-in-from-bottom-2 duration-150">
-          <div
+        <div className="lg:hidden fixed bottom-[calc(max(env(safe-area-inset-bottom),10px)+60px)] inset-x-3 z-30 animate-in fade-in slide-in-from-bottom-2 duration-150 max-w-md mx-auto">
+          <button
+            type="button"
             onClick={() => setMobileTab('court')}
-            className="p-3 bg-[#1d1d1f] text-white rounded-2xl shadow-[0_10px_25px_rgba(0,0,0,0.25)] flex items-center justify-between cursor-pointer border border-neutral-700/60 active:scale-[0.98] transition"
+            className="w-full p-3 bg-neutral-900 text-white rounded-2xl shadow-xl flex items-center justify-between border border-neutral-700/80 active:scale-[0.98] transition text-left"
           >
             <div className="flex items-center gap-2.5 min-w-0 flex-1">
               <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               <div className="min-w-0">
-                <span className="text-[11px] text-neutral-400 block font-normal">กำลังแข่งขันในคอร์ต</span>
-                <span className="text-xs font-semibold truncate block">
+                <span className="text-[10px] text-neutral-400 block font-normal">กำลังแข่งในคอร์ด</span>
+                <span className="text-xs font-bold truncate block">
                   {appState.court.teamA.name} vs {appState.court.teamB.name}
                 </span>
               </div>
             </div>
-            <span className="text-xs font-medium text-amber-400 bg-white/10 px-3 py-1.5 rounded-xl shrink-0">
-              แตะดูกระดานคะแนน 🏸
+            <span className="text-xs font-semibold text-amber-300 bg-white/10 px-2.5 py-1 rounded-xl shrink-0">
+              ดูกระดานคะแนน 🏸
             </span>
-          </div>
+          </button>
         </div>
       )}
 
-      {/* Mobile Ergonomic Bottom Navigation Bar (Dock) */}
-      <nav aria-label="แถบเมนูนำทางหลักบนมือถือ" className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white/90 backdrop-blur-xl border-t border-black/[0.08] shadow-[0_-4px_25px_rgba(0,0,0,0.06)] pb-[max(env(safe-area-inset-bottom),10px)] pt-1.5 px-1.5">
+      {/* Mobile Bottom Navigation Dock */}
+      <nav aria-label="แถบเมนูนำทางหลักบนมือถือ" className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur-xl border-t border-neutral-200/80 shadow-[0_-4px_20px_rgba(0,0,0,0.04)] pb-[max(env(safe-area-inset-bottom),8px)] pt-1 px-2">
         <div className="grid grid-cols-6 items-center max-w-lg mx-auto">
           {/* 1. Court Tab */}
           <button
+            type="button"
             onClick={() => {
               setIsAdminView(false);
               setMobileTab('court');
             }}
-            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
-              !isAdminView && mobileTab === 'court' ? 'text-neutral-950 font-semibold' : 'text-neutral-500 hover:text-neutral-800'
+            className={`min-h-[44px] flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              !isAdminView && mobileTab === 'court' ? 'text-neutral-950 font-bold' : 'text-neutral-400 hover:text-neutral-700'
             }`}
           >
             <div className="relative">
@@ -776,94 +844,106 @@ export default function App() {
                 </span>
               )}
             </div>
-            <span className="text-[9.5px] mt-0.5">คอร์ต</span>
+            <span className="text-[10px] mt-0.5">คอร์ด</span>
           </button>
 
           {/* 2. Queue Tab */}
           <button
+            type="button"
             onClick={() => {
               setIsAdminView(false);
               setMobileTab('queue');
             }}
-            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
-              !isAdminView && mobileTab === 'queue' ? 'text-neutral-950 font-semibold' : 'text-neutral-500 hover:text-neutral-800'
+            className={`min-h-[44px] flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              !isAdminView && mobileTab === 'queue' ? 'text-neutral-950 font-bold' : 'text-neutral-400 hover:text-neutral-700'
             }`}
           >
             <div className="relative">
               <Users className="w-4 h-4 sm:w-5 sm:h-5" />
               {appState.queue.length > 0 && (
-                <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-neutral-900 text-white rounded-full text-[8.5px] font-bold flex items-center justify-center">
+                <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-neutral-900 text-white rounded-full text-[8.5px] font-mono font-bold flex items-center justify-center">
                   {appState.queue.length}
                 </span>
               )}
             </div>
-            <span className="text-[9.5px] mt-0.5">คิว</span>
+            <span className="text-[10px] mt-0.5">คิว</span>
           </button>
 
-          {/* 3. History Tab */}
+          {/* 3. Meetup Group Tab */}
           <button
+            type="button"
+            onClick={() => setIsMeetupOpen(true)}
+            className="min-h-[44px] flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 text-neutral-500 hover:text-neutral-900 relative"
+          >
+            <div className="relative">
+              <QrCode className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-600" />
+              <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-emerald-600 text-white rounded-full text-[8px] font-mono font-bold flex items-center justify-center">
+                {meetupSession.participants.length}
+              </span>
+            </div>
+            <span className="text-[10px] mt-0.5 text-emerald-700 font-semibold">ก๊วน/จ่าย</span>
+          </button>
+
+          {/* 4. History Tab */}
+          <button
+            type="button"
             onClick={() => {
               setIsAdminView(false);
               setMobileTab('history');
             }}
-            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
-              !isAdminView && mobileTab === 'history' ? 'text-neutral-950 font-semibold' : 'text-neutral-500 hover:text-neutral-800'
+            className={`min-h-[44px] flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              !isAdminView && mobileTab === 'history' ? 'text-neutral-950 font-bold' : 'text-neutral-400 hover:text-neutral-700'
             }`}
           >
             <div className="relative">
               <History className="w-4 h-4 sm:w-5 sm:h-5" />
               {appState.historyLog.length > 0 && (
-                <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-neutral-200 text-neutral-800 rounded-full text-[8.5px] font-bold flex items-center justify-center">
+                <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-neutral-200 text-neutral-800 rounded-full text-[8.5px] font-mono font-bold flex items-center justify-center">
                   {appState.historyLog.length}
                 </span>
               )}
             </div>
-            <span className="text-[9.5px] mt-0.5">ประวัติ</span>
-          </button>
-
-          {/* 4. Leaderboard Tab */}
-          <button
-            onClick={() => setIsLeaderboardOpen(true)}
-            className="flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 text-neutral-500 hover:text-neutral-800"
-          >
-            <Trophy className="w-4 h-4 sm:w-5 sm:h-5 text-amber-500" />
-            <span className="text-[9.5px] mt-0.5">อันดับ</span>
+            <span className="text-[10px] mt-0.5">ประวัติ</span>
           </button>
 
           {/* 5. Google Sheets Tab */}
           <button
+            type="button"
             onClick={() => setIsSheetsOpen(true)}
-            className="flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 text-neutral-500 hover:text-neutral-800 relative"
+            className="min-h-[44px] flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 text-neutral-400 hover:text-neutral-700 relative"
           >
             <div className="relative">
-              <FileSpreadsheet className={`w-4 h-4 sm:w-5 sm:h-5 ${sheetsConfig.spreadsheetId ? 'text-emerald-600' : 'text-neutral-500'}`} />
-              {sheetsConfig.spreadsheetId && (
+              <FileSpreadsheet className={`w-4 h-4 sm:w-5 sm:h-5 ${sheetsConfig.spreadsheetId && isSheetsAuthorized ? 'text-emerald-600' : 'text-neutral-400'}`} />
+              {sheetsConfig.spreadsheetId && isSheetsAuthorized ? (
                 <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-500"></span>
-              )}
+              ) : !isSheetsAuthorized ? (
+                <Lock className="w-2.5 h-2.5 text-amber-500 absolute -bottom-0.5 -right-1.5" />
+              ) : null}
             </div>
-            <span className="text-[9.5px] mt-0.5">ชีต</span>
+            <span className="text-[10px] mt-0.5">ชีต</span>
           </button>
 
           {/* 6. Admin Backoffice Tab */}
           <button
+            type="button"
             onClick={() => setIsAdminView(!isAdminView)}
-            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
-              isAdminView ? 'text-indigo-600 font-bold' : 'text-neutral-500 hover:text-neutral-800'
+            className={`min-h-[44px] flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              isAdminView ? 'text-indigo-600 font-bold' : 'text-neutral-400 hover:text-neutral-700'
             }`}
           >
             <div className="relative">
-              <ShieldCheck className={`w-4 h-4 sm:w-5 sm:h-5 ${isAdminView ? 'text-indigo-600' : 'text-neutral-500'}`} />
-              <span className={`w-1.5 h-1.5 rounded-full absolute -top-0.5 -right-1 ${isAdminView ? 'bg-indigo-600' : 'bg-transparent'}`} />
+              <ShieldCheck className={`w-4 h-4 sm:w-5 sm:h-5 ${isAdminView ? 'text-indigo-600' : 'text-neutral-400'}`} />
+              {isAdminView && <span className="w-1.5 h-1.5 rounded-full absolute -top-0.5 -right-1 bg-indigo-600" />}
             </div>
-            <span className="text-[9.5px] mt-0.5">แอดมิน</span>
+            <span className="text-[10px] mt-0.5">แอดมิน</span>
           </button>
         </div>
       </nav>
 
-      {/* Minimal Apple-Style Footer */}
-      <footer className="border-t border-black/[0.06] bg-[#f5f5f7] py-6 text-center text-xs text-neutral-500">
-        <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2.5">
-          <span className="font-normal text-neutral-600">SmashQueue • ระบบจัดคิวแบดมินตัน ครองคอร์ตสูงสุด 2 เกม (King of the Court)</span>
+      {/* Minimal Footer */}
+      <footer className="border-t border-neutral-200/80 bg-white/50 py-5 text-center text-xs text-neutral-400">
+        <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+          <span>SmashQueue · ระบบจัดคิวแบดมินตัน ชนะ 2 ตาติดออก · คนแพ้ได้ลงก่อนคนชนะ</span>
           <span className="text-neutral-400">
             ระบบความปลอดภัยและซิงค์ข้อมูล Google Sheets ในตัว
           </span>
@@ -885,6 +965,18 @@ export default function App() {
         onUpdateConfig={setSheetsConfig}
         history={appState.historyLog}
         allPairs={allCurrentPairs}
+      />
+
+      <MeetupGroupModal
+        isOpen={isMeetupOpen}
+        onClose={() => setIsMeetupOpen(false)}
+        session={meetupSession}
+        onUpdateSession={setMeetupSession}
+        onAddParticipantToQueue={(name) => {
+          handleAddPair(name);
+          showToast(`เพิ่ม "${name}" เข้าสู่คิวผู้ท้าชิงเรียบร้อย`, 'success');
+        }}
+        isAdmin={isSheetsAuthorized}
       />
     </div>
   );

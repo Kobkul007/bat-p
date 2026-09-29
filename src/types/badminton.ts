@@ -5,6 +5,7 @@ export interface PlayerPair {
   totalMatches: number;
   status: 'playing' | 'waiting' | 'resting';
   createdAt: number;
+  lastMatchResult?: 'win' | 'loss' | 'king_exit';
 }
 
 export interface CourtState {
@@ -47,4 +48,9 @@ export interface GoogleSheetsConfig {
   autoSync: boolean;
   lastSyncedAt: number | null;
   userEmail: string | null;
+}
+
+export interface AdminAuthConfig {
+  creatorEmail: string;
+  allowedEmails: string[];
 }
