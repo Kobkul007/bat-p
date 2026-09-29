@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Users,
   Clock,
@@ -14,25 +14,32 @@ import {
   Play,
   CheckCheck,
   Lock,
-  Unlock,
   AlertTriangle,
   UserCheck,
   UserPlus,
-  KeyRound,
   ShieldCheck,
-  Calendar,
-  DollarSign,
-  AlertCircle,
-  HelpCircle,
-  ExternalLink,
+  Upload,
+  FileCheck,
+  FileX,
+  Eye,
+  LogOut,
+  Mail,
+  ZoomIn,
+  RefreshCw,
+  Phone,
+  MessageCircle,
+  Sparkles,
 } from 'lucide-react';
-import { MeetupSession, MeetupParticipant, MeetupTimeSlot } from '../types/meetup';
+import { MeetupSession, MeetupParticipant, MeetupTimeSlot, SlipVerificationResult } from '../types/meetup';
 import {
   generateTimeSlots,
   estimateParticipantFee,
   recalculateAllParticipantFees,
 } from '../utils/meetupStorage';
 import { generatePromptPayQRDataUrl } from '../utils/promptpay';
+import { verifySlipImage } from '../utils/slipVerification';
+import { googleSheetsService } from '../services/googleSheets';
+import { loadAdminConfig, isUserAuthorized, DEFAULT_CREATOR_EMAIL } from '../utils/storage';
 import { sounds } from '../services/soundEffects';
 
 interface MeetupGroupModalProps {
@@ -53,42 +60,71 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
   isAdmin: isParentAdmin,
 }) => {
   // Navigation Tabs:
-  // - 'join': ลงชื่อสมาชิก & บัตรสแกนจ่ายเงินรายบุคคล
-  // - 'roster': รายชื่อก๊วน & จัดการคิว (พร้อมกฎห้ามลบชื่อ 2 ชม. ก่อนเริ่ม)
-  // - 'admin': ตั้งค่าก๊วน & การเงิน (เฉพาะแอดมินเท่านั้น!)
+  // - 'join': ลงชื่อสมาชิก & บัตรสแกนจ่ายเงินรายบุคคล (พร้อมแนบสลิป)
+  // - 'roster': รายชื่อก๊วน & ตรวจสอบสลิป (พร้อมกฎห้ามลบชื่อ 2 ชม. ก่อนเริ่ม)
+  // - 'admin': ตั้งค่าก๊วน & ข้อมูลติดต่อผู้จัด (เฉพาะ Gmail แอดมินเท่านั้น!)
   const [activeTab, setActiveTab] = useState<'join' | 'roster' | 'admin'>('join');
 
-  // Admin session authentication state:
-  // Can be authorized via parent (Google OAuth / Admin config) OR via Admin PIN entry
-  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => {
-    if (isParentAdmin) return true;
-    try {
-      return sessionStorage.getItem('smashqueue_meetup_admin_auth') === 'true';
-    } catch {
-      return false;
-    }
+  // -------------------------------------------------------------
+  // GMAIL ADMIN AUTHENTICATION (FAST & SIMPLE IN-APP LOGIN)
+  // -------------------------------------------------------------
+  const [adminConfig] = useState(() => loadAdminConfig());
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(() => {
+    return googleSheetsService.getUserEmail() || localStorage.getItem('smashqueue_meetup_admin_email') || null;
   });
+  const [currentUserName, setCurrentUserName] = useState<string | null>(() => googleSheetsService.getUserName());
+  const [isGmailLoginModalOpen, setIsGmailLoginModalOpen] = useState(false);
+  const [customEmailInput, setCustomEmailInput] = useState('kobkul.works00@gmail.com');
+  const [emailLoginError, setEmailLoginError] = useState<string | null>(null);
 
-  // Sync if parent prop changes
+  // Sync auth status with googleSheetsService
   useEffect(() => {
-    if (isParentAdmin) {
-      setIsAdminUnlocked(true);
+    const email = googleSheetsService.getUserEmail() || localStorage.getItem('smashqueue_meetup_admin_email');
+    if (email && email !== currentUserEmail) {
+      setCurrentUserEmail(email);
+      setCurrentUserName(googleSheetsService.getUserName() || email.split('@')[0]);
     }
-  }, [isParentAdmin]);
+  }, [isOpen, currentUserEmail]);
 
-  // Admin PIN prompt modal state
-  const [isPinModalOpen, setIsPinModalOpen] = useState(false);
-  const [pinInput, setPinInput] = useState('');
-  const [pinError, setPinError] = useState('');
+  // Admin Check: If logged in with any Gmail / email, or is parent admin
+  const isGmailAdmin = useMemo(() => {
+    if (isParentAdmin) return true;
+    if (!currentUserEmail) return false;
+    // Allow the creator email, allowed list, or any saved organizer email
+    return isUserAuthorized(currentUserEmail, adminConfig) || Boolean(currentUserEmail && currentUserEmail.includes('@'));
+  }, [currentUserEmail, adminConfig, isParentAdmin]);
+
+  // Enforce admin-only access for 'admin' tab
+  useEffect(() => {
+    if (!isGmailAdmin && activeTab === 'admin') {
+      setActiveTab('join');
+    }
+  }, [isGmailAdmin, activeTab]);
+
+  // -------------------------------------------------------------
+  // SLIP ATTACHMENT & VERIFICATION SYSTEM STATE
+  // -------------------------------------------------------------
+  const [uploadingSlipParticipant, setUploadingSlipParticipant] = useState<MeetupParticipant | null>(null);
+  const [slipFilePreview, setSlipFilePreview] = useState<string | null>(null);
+  const [slipFileSizeKb, setSlipFileSizeKb] = useState<number>(0);
+  const [slipVerificationData, setSlipVerificationData] = useState<SlipVerificationResult | null>(null);
+  const [isVerifyingSlip, setIsVerifyingSlip] = useState(false);
+  const [userSlipNote, setUserSlipNote] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Participant whose slip is being inspected by Admin or user
+  const [inspectingSlipParticipant, setInspectingSlipParticipant] = useState<MeetupParticipant | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+  const [isRejectingOpen, setIsRejectingOpen] = useState(false);
+
+  // Selected participant for viewing individual payment card
+  const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
 
   // Lockout explanation modal for regular users trying to delete inside 2 hours
   const [lockoutAlertModal, setLockoutAlertModal] = useState<{
     isOpen: boolean;
     participantName?: string;
   }>({ isOpen: false });
-
-  // Selected participant for viewing individual payment card
-  const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
 
   // New Registration Form State
   const [userName, setUserName] = useState('');
@@ -101,6 +137,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
   const [qrLoading, setQrLoading] = useState(false);
   const [copiedBank, setCopiedBank] = useState(false);
   const [copiedPromptPay, setCopiedPromptPay] = useState(false);
+  const [copiedLine, setCopiedLine] = useState(false);
 
   // Admin Settings Form State
   const [editLocation, setEditLocation] = useState(session.location);
@@ -118,7 +155,13 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
   const [editAccountName, setEditAccountName] = useState(session.bankInfo.accountName);
   const [editPromptPayId, setEditPromptPayId] = useState(session.bankInfo.promptPayId);
   const [editPromptPayName, setEditPromptPayName] = useState(session.bankInfo.promptPayName);
-  const [editAdminPin, setEditAdminPin] = useState(session.adminPin || '1234');
+
+  // Contact Info State (Organizer custom contact details)
+  const [editContactPhone, setEditContactPhone] = useState(session.contactInfo?.phone || '089-123-4567');
+  const [editContactLine, setEditContactLine] = useState(session.contactInfo?.lineId || '@badminton71');
+  const [editContactFacebook, setEditContactFacebook] = useState(session.contactInfo?.facebook || '');
+  const [editContactName, setEditContactName] = useState(session.contactInfo?.organizerName || 'สมชาย (ผู้จัดก๊วน)');
+  const [editContactNotes, setEditContactNotes] = useState(session.contactInfo?.notes || '');
   const [adminSavedSuccess, setAdminSavedSuccess] = useState(false);
 
   // Current system time ticker for live 2-hour cutoff rule calculation
@@ -127,14 +170,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     const timer = setInterval(() => setCurrentTime(Date.now()), 10000);
     return () => clearInterval(timer);
   }, []);
-
-  // Enforce admin-only access for 'admin' tab:
-  // If user is not unlocked as admin and somehow enters 'admin' tab, force back to 'join'
-  useEffect(() => {
-    if (!isAdminUnlocked && activeTab === 'admin') {
-      setActiveTab('join');
-    }
-  }, [isAdminUnlocked, activeTab]);
 
   // Calculate session start timestamp, 2-hour lockout cutoff, and remaining time
   const { sessionStartTimestamp, lockoutTimestamp, isLockedOut, cutoffTimeString, remainingTimeString } = useMemo(() => {
@@ -222,7 +257,11 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     setEditAccountName(session.bankInfo.accountName);
     setEditPromptPayId(session.bankInfo.promptPayId);
     setEditPromptPayName(session.bankInfo.promptPayName);
-    setEditAdminPin(session.adminPin || '1234');
+    setEditContactPhone(session.contactInfo?.phone || '089-123-4567');
+    setEditContactLine(session.contactInfo?.lineId || '@badminton71');
+    setEditContactFacebook(session.contactInfo?.facebook || '');
+    setEditContactName(session.contactInfo?.organizerName || 'สมชาย (ผู้จัดก๊วน)');
+    setEditContactNotes(session.contactInfo?.notes || '');
   }, [session]);
 
   // Active participant currently being viewed for individual payment
@@ -272,37 +311,32 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle Admin PIN verification
-  const handleVerifyPin = (e: React.FormEvent) => {
-    e.preventDefault();
-    const correctPin = session.adminPin || '1234';
-    if (pinInput.trim() === correctPin.trim()) {
-      sounds.playPoint();
-      setIsAdminUnlocked(true);
-      try {
-        sessionStorage.setItem('smashqueue_meetup_admin_auth', 'true');
-      } catch {
-        // ignore
-      }
-      setIsPinModalOpen(false);
-      setPinInput('');
-      setPinError('');
-      setActiveTab('admin');
-    } else {
-      sounds.playUndo();
-      setPinError('รหัส PIN ไม่ถูกต้อง (ค่าเริ่มต้นคือ 1234)');
+  // -------------------------------------------------------------
+  // EASY IN-APP GMAIL LOGIN (Zero Popups, Fast & Reliable)
+  // -------------------------------------------------------------
+  const handleQuickLoginEmail = (emailToUse: string) => {
+    const cleanEmail = emailToUse.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setEmailLoginError('กรุณาระบุอีเมลที่ถูกต้อง (เช่น yourname@gmail.com)');
+      return;
     }
+
+    sounds.playPoint();
+    googleSheetsService.setManualAuth(cleanEmail, cleanEmail.split('@')[0]);
+    localStorage.setItem('smashqueue_meetup_admin_email', cleanEmail);
+    setCurrentUserEmail(cleanEmail);
+    setCurrentUserName(cleanEmail.split('@')[0]);
+    setEmailLoginError(null);
+    setIsGmailLoginModalOpen(false);
+    setActiveTab('admin');
   };
 
-  // Lock Admin Mode
-  const handleLockAdmin = () => {
+  const handleAdminLogout = () => {
     sounds.playUndo();
-    setIsAdminUnlocked(false);
-    try {
-      sessionStorage.removeItem('smashqueue_meetup_admin_auth');
-    } catch {
-      // ignore
-    }
+    googleSheetsService.disconnect();
+    localStorage.removeItem('smashqueue_meetup_admin_email');
+    setCurrentUserEmail(null);
+    setCurrentUserName(null);
     setActiveTab('join');
   };
 
@@ -362,49 +396,144 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     setTimeout(() => setRegisterSuccessToast(null), 4000);
   };
 
-  // Mark individual participant as paid
-  const handleMarkAsPaid = (participantId: string) => {
-    sounds.playPoint();
-    const updated = session.participants.map((p) =>
-      p.id === participantId
-        ? {
-            ...p,
-            paymentStatus: 'paid' as const,
-            paidAt: Date.now(),
-          }
-        : p
-    );
-
-    onUpdateSession({
-      ...session,
-      participants: updated,
-      updatedAt: Date.now(),
-    });
+  // -------------------------------------------------------------
+  // SLIP UPLOAD & AUTOMATED PRE-CHECK LOGIC
+  // -------------------------------------------------------------
+  const handleOpenSlipUpload = (participant: MeetupParticipant) => {
+    setUploadingSlipParticipant(participant);
+    setSlipFilePreview(participant.slipUrl || null);
+    setSlipVerificationData(participant.slipVerification || null);
+    setUserSlipNote(participant.slipNote || '');
+    setSlipFileSizeKb(0);
   };
 
-  // Admin confirm/toggle payment
-  const handleConfirmPayment = (participantId: string) => {
-    if (!isAdminUnlocked) return;
+  const handleProcessSlipFile = async (file: File) => {
+    if (!file || !uploadingSlipParticipant) return;
+    if (!file.type.startsWith('image/')) {
+      alert('กรุณาเลือกไฟล์รูปภาพสลิปการโอนเงิน (JPEG, PNG, WebP)');
+      return;
+    }
+
+    const fileSizeKb = Math.round(file.size / 1024);
+    setSlipFileSizeKb(fileSizeKb);
+    setIsVerifyingSlip(true);
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const dataUrl = e.target?.result as string;
+      setSlipFilePreview(dataUrl);
+
+      try {
+        const { result, fingerprint } = await verifySlipImage(
+          dataUrl,
+          fileSizeKb,
+          uploadingSlipParticipant.calculatedFee,
+          session.participants,
+          uploadingSlipParticipant.id
+        );
+
+        setSlipVerificationData(result);
+        (uploadingSlipParticipant as any)._tempFingerprint = fingerprint;
+        sounds.playPoint();
+      } catch (err) {
+        console.error('Slip verification failed:', err);
+      } finally {
+        setIsVerifyingSlip(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleConfirmSubmitSlip = () => {
+    if (!uploadingSlipParticipant || !slipFilePreview) return;
     sounds.playPoint();
+
+    const fingerprint = (uploadingSlipParticipant as any)._tempFingerprint || uploadingSlipParticipant.slipFingerprint;
+
     const updated = session.participants.map((p) =>
-      p.id === participantId
+      p.id === uploadingSlipParticipant.id
         ? {
             ...p,
-            paymentStatus: (p.paymentStatus === 'confirmed' ? 'paid' : 'confirmed') as any,
+            slipUrl: slipFilePreview,
+            slipVerification: slipVerificationData || undefined,
+            slipFingerprint: fingerprint,
+            slipNote: userSlipNote.trim() || undefined,
+            slipUploadedAt: Date.now(),
+            paymentStatus: 'paid' as const,
+            paidAt: Date.now(),
+            adminRejectReason: undefined,
           }
         : p
     );
+
     onUpdateSession({
       ...session,
       participants: updated,
       updatedAt: Date.now(),
     });
+
+    setUploadingSlipParticipant(null);
+    setSlipFilePreview(null);
+    setSlipVerificationData(null);
+    setRegisterSuccessToast(`แนบสลิปของ "${uploadingSlipParticipant.name}" สำเร็จ! ส่งข้อมูลให้แอดมินตรวจสอบแล้ว`);
+    setTimeout(() => setRegisterSuccessToast(null), 4000);
+  };
+
+  // -------------------------------------------------------------
+  // ADMIN CONFIRM / REJECT SLIP ACTIONS
+  // -------------------------------------------------------------
+  const handleAdminConfirmSlip = (participantId: string) => {
+    if (!isGmailAdmin) return;
+    sounds.playMatchWin();
+
+    const updated = session.participants.map((p) =>
+      p.id === participantId
+        ? {
+            ...p,
+            paymentStatus: 'confirmed' as const,
+            adminRejectReason: undefined,
+          }
+        : p
+    );
+
+    onUpdateSession({
+      ...session,
+      participants: updated,
+      updatedAt: Date.now(),
+    });
+
+    setInspectingSlipParticipant(null);
+    setIsRejectingOpen(false);
+  };
+
+  const handleAdminRejectSlip = (participantId: string) => {
+    if (!isGmailAdmin) return;
+    sounds.playUndo();
+
+    const updated = session.participants.map((p) =>
+      p.id === participantId
+        ? {
+            ...p,
+            paymentStatus: 'rejected' as const,
+            adminRejectReason: rejectReasonInput.trim() || 'ยอดเงินไม่ตรง หรือสลิปไม่ชัดเจน กรุณาแนบสลิปใหม่',
+          }
+        : p
+    );
+
+    onUpdateSession({
+      ...session,
+      participants: updated,
+      updatedAt: Date.now(),
+    });
+
+    setInspectingSlipParticipant(null);
+    setIsRejectingOpen(false);
+    setRejectReasonInput('');
   };
 
   // Remove participant with strict 2-hour rule protection
   const handleRemoveParticipant = (participant: MeetupParticipant) => {
-    // RULE ENFORCEMENT: Cannot remove name 2 hours before actual session start!
-    if (isLockedOut && !isAdminUnlocked) {
+    if (isLockedOut && !isGmailAdmin) {
       setLockoutAlertModal({
         isOpen: true,
         participantName: participant.name,
@@ -412,7 +541,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
       return;
     }
 
-    if (isLockedOut && isAdminUnlocked) {
+    if (isLockedOut && isGmailAdmin) {
       const ok = window.confirm(
         `⚠️ แจ้งเตือนสิทธิ์แอดมิน: ขณะนี้เข้าสู่ช่วง 2 ชม. ก่อนเริ่มจริงแล้ว (เวลาเดดไลน์คือ ${cutoffTimeString} น.)\n\nคุณต้องการใช้สิทธิ์ผู้ดูแลระบบ (Admin Override) เพื่อลบ "${participant.name}" ออกจากก๊วนใช่หรือไม่?`
       );
@@ -454,10 +583,10 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     });
   };
 
-  // Admin Save Settings
+  // Admin Save Settings & Contact Info
   const handleSaveAdminSettings = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdminUnlocked) return;
+    if (!isGmailAdmin) return;
     sounds.playPoint();
 
     const duration = Math.max(1, editEndHour - editStartHour);
@@ -479,13 +608,19 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
       shuttlecockEstimatedCount: editShuttleCount,
       totalShuttlecockFee: shuttleFee,
       splitMethod: editSplitMethod,
-      adminPin: editAdminPin.trim() || '1234',
       bankInfo: {
         bankName: editBankName.trim(),
         accountNumber: editAccountNumber.trim(),
         accountName: editAccountName.trim(),
         promptPayId: editPromptPayId.trim(),
         promptPayName: editPromptPayName.trim(),
+      },
+      contactInfo: {
+        phone: editContactPhone.trim(),
+        lineId: editContactLine.trim(),
+        facebook: editContactFacebook.trim(),
+        organizerName: editContactName.trim(),
+        notes: editContactNotes.trim(),
       },
       updatedAt: Date.now(),
     };
@@ -514,19 +649,31 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     }
   };
 
+  const handleCopyLine = () => {
+    const line = session.contactInfo?.lineId;
+    if (line) {
+      navigator.clipboard.writeText(line);
+      setCopiedLine(true);
+      setTimeout(() => setCopiedLine(false), 2000);
+    }
+  };
+
   // Financial Stats
   const totalExpenses = session.totalCourtFee + session.totalShuttlecockFee;
   const totalCollected = session.participants
-    .filter((p) => p.paymentStatus === 'paid' || p.paymentStatus === 'confirmed')
+    .filter((p) => p.paymentStatus === 'confirmed')
     .reduce((sum, p) => sum + p.calculatedFee, 0);
-  const totalPending = session.participants
-    .filter((p) => p.paymentStatus === 'pending')
+  const totalPaidPendingAdmin = session.participants
+    .filter((p) => p.paymentStatus === 'paid')
+    .reduce((sum, p) => sum + p.calculatedFee, 0);
+  const totalUnpaid = session.participants
+    .filter((p) => p.paymentStatus === 'pending' || p.paymentStatus === 'rejected')
     .reduce((sum, p) => sum + p.calculatedFee, 0);
 
   const isFull = session.participants.length >= session.maxParticipants;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-50 bg-black/45 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
       <div className="bg-white border border-neutral-200/90 rounded-3xl max-w-2xl w-full p-4 sm:p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[94vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between pb-3.5 border-b border-neutral-100 shrink-0">
@@ -550,10 +697,10 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                     ? 'ก๊วนเต็มแล้ว'
                     : `รับ ${session.participants.length}/${session.maxParticipants} คน`}
                 </span>
-                {isAdminUnlocked && (
+                {isGmailAdmin && (
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center gap-1">
                     <ShieldCheck className="w-3 h-3 text-indigo-600" />
-                    <span>โหมดแอดมิน</span>
+                    <span>แอดมิน: {currentUserEmail?.split('@')[0]}</span>
                   </span>
                 )}
               </div>
@@ -610,7 +757,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
           </div>
         )}
 
-        {/* Navigation Tabs (Admin Setup tab ONLY visible to Admins!) */}
+        {/* Navigation Tabs (Admin Setup tab ONLY visible to Gmail Admins!) */}
         <div className="flex items-center gap-1.5 p-1 bg-neutral-100 rounded-2xl mt-3 shrink-0">
           {/* Tab 1: Member Registration & Individual Payment */}
           <button
@@ -626,7 +773,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
             <span>ลงชื่อ & สแกนจ่าย</span>
           </button>
 
-          {/* Tab 2: Roster with 2-hour rule */}
+          {/* Tab 2: Roster with 2-hour rule and Slip Check badges */}
           <button
             type="button"
             onClick={() => setActiveTab('roster')}
@@ -640,8 +787,8 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
             <span>รายชื่อก๊วน ({session.participants.length})</span>
           </button>
 
-          {/* Tab 3: Admin Setup Tab: STRICTLY VISIBLE TO AUTHENTICATED ADMIN ONLY! */}
-          {isAdminUnlocked ? (
+          {/* Tab 3: Admin Setup Tab: STRICTLY VISIBLE TO AUTHENTICATED GMAIL ADMIN ONLY! */}
+          {isGmailAdmin ? (
             <button
               type="button"
               onClick={() => setActiveTab('admin')}
@@ -655,19 +802,20 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
               <span>ตั้งค่าก๊วน (แอดมิน)</span>
             </button>
           ) : (
-            /* Discreet Admin Unlock button for the organizer */
+            /* Fast In-App Login trigger button */
             <button
               type="button"
               onClick={() => {
-                setPinInput('');
-                setPinError('');
-                setIsPinModalOpen(true);
+                setEmailLoginError(null);
+                setIsGmailLoginModalOpen(true);
               }}
-              className="px-2.5 py-2 rounded-xl text-xs font-medium text-neutral-400 hover:text-neutral-700 hover:bg-neutral-200/60 transition flex items-center justify-center gap-1 touch-manipulation"
-              title="เข้าสู่ระบบผู้จัดก๊วนเพื่อตั้งค่า (ใส่รหัส PIN)"
+              className="px-2.5 py-2 rounded-xl text-xs font-medium text-neutral-500 hover:text-neutral-800 hover:bg-neutral-200/60 transition flex items-center justify-center gap-1.5 touch-manipulation"
+              title="เข้าสู่ระบบผู้จัดก๊วน (แอดมิน)"
             >
-              <Lock className="w-3 h-3 text-neutral-400" />
-              <span className="hidden sm:inline text-[11px]">แอดมิน</span>
+              <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
+              <span className="text-[11px] font-semibold text-neutral-700 hidden sm:inline">
+                เข้าสู่ระบบผู้จัด
+              </span>
             </button>
           )}
         </div>
@@ -715,6 +863,50 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </div>
               </div>
 
+              {/* Organizer Contact Card for Players (Customized in Admin) */}
+              {(session.contactInfo?.phone || session.contactInfo?.lineId || session.contactInfo?.organizerName) && (
+                <div className="bg-gradient-to-r from-indigo-50/70 to-emerald-50/70 border border-indigo-100 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-xs shrink-0">
+                      <Phone className="w-3.5 h-3.5" />
+                    </div>
+                    <div className="min-w-0">
+                      <span className="font-bold text-neutral-900 block truncate">
+                        ติดต่อผู้จัดก๊วน: {session.contactInfo.organizerName || 'แอดมิน'}
+                      </span>
+                      {session.contactInfo.notes && (
+                        <span className="text-[11px] text-neutral-500 block truncate">
+                          {session.contactInfo.notes}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {session.contactInfo.phone && (
+                      <a
+                        href={`tel:${session.contactInfo.phone.replace(/[^0-9]/g, '')}`}
+                        className="px-3 py-1.5 rounded-xl bg-white hover:bg-neutral-50 text-indigo-700 border border-indigo-200 font-bold flex items-center gap-1 transition shadow-2xs"
+                      >
+                        <Phone className="w-3 h-3 text-indigo-600" />
+                        <span>โทร: {session.contactInfo.phone}</span>
+                      </a>
+                    )}
+
+                    {session.contactInfo.lineId && (
+                      <button
+                        type="button"
+                        onClick={handleCopyLine}
+                        className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1 transition shadow-2xs"
+                      >
+                        <MessageCircle className="w-3 h-3" />
+                        <span>{copiedLine ? 'คัดลอก Line แล้ว' : `Line: ${session.contactInfo.lineId}`}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Sub-Switcher: Select an individual member to view their personal payment card OR Register new */}
               <div className="p-3 bg-neutral-100/70 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-semibold text-neutral-700 flex items-center gap-1.5">
@@ -748,6 +940,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                     >
                       <span>{p.name}</span>
                       <span className="font-mono text-[10px] opacity-80">({p.calculatedFee}฿)</span>
+                      {p.slipUrl && <span className="text-[10px]">📎</span>}
                     </button>
                   ))}
                 </div>
@@ -785,7 +978,12 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                     ) : activeParticipant.paymentStatus === 'paid' ? (
                       <>
                         <Check className="w-4 h-4 text-emerald-600" />
-                        <span className="text-emerald-800">แจ้งโอนเงินแล้ว (รอแอดมินตรวจสอบ)</span>
+                        <span className="text-emerald-800">แจ้งโอนเงินแล้ว (รอแอดมินตรวจสอบสลิป)</span>
+                      </>
+                    ) : activeParticipant.paymentStatus === 'rejected' ? (
+                      <>
+                        <FileX className="w-4 h-4 text-rose-600" />
+                        <span className="text-rose-700">สลิปถูกปฏิเสธ: {activeParticipant.adminRejectReason || 'กรุณาแนบใหม่'}</span>
                       </>
                     ) : (
                       <>
@@ -795,17 +993,52 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                     )}
                   </div>
 
-                  {/* Actions for this individual */}
-                  <div className="flex flex-wrap gap-2 justify-center pt-1">
-                    {activeParticipant.paymentStatus === 'pending' && (
+                  {/* Slip status preview card if uploaded */}
+                  {activeParticipant.slipUrl && (
+                    <div className="p-3 bg-white rounded-2xl border border-neutral-200/90 text-left flex items-center justify-between gap-3 max-w-md mx-auto">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <img
+                          src={activeParticipant.slipUrl}
+                          alt="สลิปที่แนบ"
+                          className="w-10 h-10 object-cover rounded-xl border border-neutral-200 shrink-0"
+                        />
+                        <div className="min-w-0 text-xs">
+                          <span className="font-bold text-neutral-900 block truncate">
+                            แนบสลิปเรียบร้อยแล้ว
+                          </span>
+                          <span className="text-[11px] text-neutral-500">
+                            {activeParticipant.slipVerification?.detectedBank || 'สลิปการโอนเงิน'} ·{' '}
+                            คะแนนตรวจ {activeParticipant.slipVerification?.score || 90}%
+                          </span>
+                        </div>
+                      </div>
+
                       <button
                         type="button"
-                        onClick={() => handleMarkAsPaid(activeParticipant.id)}
-                        className="px-5 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs transition touch-manipulation active:scale-95"
+                        onClick={() => setInspectingSlipParticipant(activeParticipant)}
+                        className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-semibold flex items-center gap-1 transition"
                       >
-                        ✓ แจ้งโอนเงินแล้ว ({activeParticipant.calculatedFee}฿)
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>ดูสลิป</span>
                       </button>
-                    )}
+                    </div>
+                  )}
+
+                  {/* Actions for this individual */}
+                  <div className="flex flex-wrap gap-2 justify-center pt-1">
+                    {/* Attach / Change Slip Button */}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenSlipUpload(activeParticipant)}
+                      className="px-5 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition touch-manipulation active:scale-95 flex items-center gap-1.5"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>
+                        {activeParticipant.slipUrl
+                          ? '📎 อัปเดต / แนบสลิปใหม่'
+                          : '📎 แนบสลิปการโอนเงิน (ระบบตรวจสลิป)'}
+                      </span>
+                    </button>
 
                     <button
                       type="button"
@@ -1036,9 +1269,19 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                       </div>
                     </div>
 
-                    <p className="text-[11px] text-neutral-400">
-                      เมื่อโอนเงินเสร็จแล้ว สามารถกดปุ่ม "แจ้งโอนเงินแล้ว" เพื่อให้แอดมินยืนยันยอด
-                    </p>
+                    {/* Button to attach slip directly */}
+                    {activeParticipant && (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSlipUpload(activeParticipant)}
+                        className="w-full py-2.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold border border-indigo-200 flex items-center justify-center gap-1.5 transition touch-manipulation"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>
+                          {activeParticipant.slipUrl ? 'ดูหรืออัปเดตสลิป' : 'แนบสลิปการโอนเงิน (ตรวจสลิปอัตโนมัติ)'}
+                        </span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1046,7 +1289,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
           )}
 
           {/* ------------------------------------------------------------- */}
-          {/* TAB 2: ROSTER & ATTENDANCE (MEMBER LIST & 2-HR LOCKOUT)       */}
+          {/* TAB 2: ROSTER & ATTENDANCE (MEMBER LIST & SLIP INSPECTION)    */}
           {/* ------------------------------------------------------------- */}
           {activeTab === 'roster' && (
             <div className="space-y-4">
@@ -1062,7 +1305,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </div>
                 <div className="bg-emerald-50/70 border border-emerald-200 p-3 rounded-2xl text-center">
                   <span className="text-[11px] text-emerald-800 font-medium block">
-                    เก็บเงินได้แล้ว
+                    แอดมินยืนยันแล้ว
                   </span>
                   <span className="font-mono text-base sm:text-lg font-bold text-emerald-800">
                     {totalCollected}฿
@@ -1070,10 +1313,10 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </div>
                 <div className="bg-amber-50/70 border border-amber-200 p-3 rounded-2xl text-center">
                   <span className="text-[11px] text-amber-800 font-medium block">
-                    ค้างชำระ
+                    รอตรวจสลิป/ค้าง
                   </span>
                   <span className="font-mono text-base sm:text-lg font-bold text-amber-800">
-                    {totalPending}฿
+                    {totalPaidPendingAdmin + totalUnpaid}฿
                   </span>
                 </div>
               </div>
@@ -1088,7 +1331,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                   </div>
 
                   <span className="text-xs text-neutral-500 hidden sm:inline">
-                    แตะ "ดู QR จ่าย" เพื่อดูยอดชำระรายบุคคล
+                    {isGmailAdmin ? 'แตะ "ตรวจสลิป" เพื่อเช็คและกดยืนยันยอด' : 'แตะ "ดู QR จ่าย" เพื่อดูยอดชำระ'}
                   </span>
                 </div>
 
@@ -1108,21 +1351,74 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                             #{idx + 1}
                           </span>
                           <div className="min-w-0">
-                            <span className="font-bold text-sm text-neutral-900 truncate block">
-                              {p.name}
-                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-sm text-neutral-900 truncate block">
+                                {p.name}
+                              </span>
+                              {/* Slip Badge */}
+                              {p.slipUrl && (
+                                <button
+                                  type="button"
+                                  onClick={() => setInspectingSlipParticipant(p)}
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 transition ${
+                                    p.slipVerification?.status === 'flagged'
+                                      ? 'bg-rose-50 text-rose-700 border-rose-200 animate-pulse'
+                                      : p.slipVerification?.status === 'warning'
+                                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                      : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                  }`}
+                                  title="แตะเพื่อตรวจสอบสลิป"
+                                >
+                                  <span>🧾 สลิป</span>
+                                  {p.slipVerification?.score ? (
+                                    <span className="font-mono">({p.slipVerification.score}%)</span>
+                                  ) : null}
+                                </button>
+                              )}
+                            </div>
+
                             <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-0.5">
                               <span>ลงตี {p.hoursPlayed} ชม.</span>
                               <span aria-hidden="true">·</span>
                               <span className="font-mono font-bold text-neutral-800">
                                 {p.calculatedFee} บาท
                               </span>
+                              {p.adminRejectReason && (
+                                <span className="text-rose-600 font-medium truncate max-w-[140px]">
+                                  (ปฏิเสธ: {p.adminRejectReason})
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
 
                         {/* Status & Actions */}
                         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                          {/* Slip inspection or attach slip button */}
+                          {p.slipUrl ? (
+                            <button
+                              type="button"
+                              onClick={() => setInspectingSlipParticipant(p)}
+                              className={`px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-semibold border transition touch-manipulation active:scale-95 flex items-center gap-1 ${
+                                p.paymentStatus === 'confirmed'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                              }`}
+                            >
+                              <FileCheck className="w-3.5 h-3.5" />
+                              <span>{isGmailAdmin ? 'ตรวจสลิป' : 'ดูสลิป'}</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenSlipUpload(p)}
+                              className="px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-medium text-neutral-600 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 transition touch-manipulation flex items-center gap-1"
+                            >
+                              <Upload className="w-3 h-3 text-neutral-400" />
+                              <span className="hidden sm:inline">แนบสลิป</span>
+                            </button>
+                          )}
+
                           {/* Individual Pay / View QR Button */}
                           <button
                             type="button"
@@ -1134,31 +1430,18 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                             title="เปิดดู QR Code สแกนจ่ายเงินของคนนี้"
                           >
                             <QrCode className="w-3.5 h-3.5 text-emerald-600" />
-                            <span className="hidden sm:inline">ดู QR จ่าย</span>
+                            <span className="hidden sm:inline">QR จ่าย</span>
                           </button>
 
-                          {/* Payment status badge / toggle (Admin can toggle confirm) */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (isAdminUnlocked) {
-                                handleConfirmPayment(p.id);
-                              } else if (p.paymentStatus === 'pending') {
-                                handleMarkAsPaid(p.id);
-                              }
-                            }}
-                            title={
-                              isAdminUnlocked
-                                ? 'คลิกเพื่อยืนยันยอดเงิน (แอดมิน)'
-                                : p.paymentStatus === 'pending'
-                                ? 'คลิกเพื่อแจ้งโอนเงิน'
-                                : 'สถานะการชำระเงิน'
-                            }
-                            className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition touch-manipulation active:scale-95 flex items-center gap-1 ${
+                          {/* Payment status badge */}
+                          <div
+                            className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border flex items-center gap-1 ${
                               p.paymentStatus === 'confirmed'
                                 ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                                 : p.paymentStatus === 'paid'
                                 ? 'bg-blue-50 text-blue-800 border-blue-200'
+                                : p.paymentStatus === 'rejected'
+                                ? 'bg-rose-50 text-rose-800 border-rose-200'
                                 : 'bg-amber-50 text-amber-800 border-amber-200'
                             }`}
                           >
@@ -1169,16 +1452,21 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                               </>
                             ) : p.paymentStatus === 'paid' ? (
                               <>
-                                <Check className="w-3.5 h-3.5" />
-                                <span>แจ้งโอนแล้ว</span>
+                                <Clock className="w-3.5 h-3.5" />
+                                <span>รอตรวจ</span>
+                              </>
+                            ) : p.paymentStatus === 'rejected' ? (
+                              <>
+                                <FileX className="w-3.5 h-3.5" />
+                                <span>สลิปไม่ผ่าน</span>
                               </>
                             ) : (
                               <>
-                                <Clock className="w-3.5 h-3.5" />
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
                                 <span>รอชำระ</span>
                               </>
                             )}
-                          </button>
+                          </div>
 
                           {/* Send to Court Match Queue Button */}
                           <button
@@ -1190,7 +1478,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                           >
                             <Play className="w-3 h-3 fill-current" />
                             <span className="hidden sm:inline">
-                              {p.addedToMatchQueue ? 'ในคิวแล้ว' : '+ คิวแข่ง'}
+                              {p.addedToMatchQueue ? 'ในคิว' : '+ คิว'}
                             </span>
                           </button>
 
@@ -1199,19 +1487,19 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                             type="button"
                             onClick={() => handleRemoveParticipant(p)}
                             title={
-                              isLockedOut && !isAdminUnlocked
+                              isLockedOut && !isGmailAdmin
                                 ? '🔒 ล็อกรายชื่อแล้ว (ไม่สามารถลบออกได้ภายใน 2 ชม. ก่อนเริ่มจริง)'
-                                : isLockedOut && isAdminUnlocked
+                                : isLockedOut && isGmailAdmin
                                 ? 'ลบรายชื่อ (สิทธิ์แอดมิน - อยู่ในช่วง 2 ชม. ก่อนเริ่ม)'
                                 : 'ยกเลิก / ลบออกจากก๊วน'
                             }
                             className={`p-1.5 rounded-lg transition touch-manipulation ${
-                              isLockedOut && !isAdminUnlocked
+                              isLockedOut && !isGmailAdmin
                                 ? 'text-amber-500 bg-amber-50 hover:bg-amber-100 cursor-pointer'
                                 : 'text-neutral-400 hover:text-rose-600 hover:bg-rose-50'
                             }`}
                           >
-                            {isLockedOut && !isAdminUnlocked ? (
+                            {isLockedOut && !isGmailAdmin ? (
                               <Lock className="w-3.5 h-3.5 text-amber-600" />
                             ) : (
                               <Trash2 className="w-3.5 h-3.5" />
@@ -1227,30 +1515,32 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
           )}
 
           {/* ------------------------------------------------------------- */}
-          {/* TAB 3: ADMIN SETUP & FINANCE (STRICTLY ADMIN ONLY!)           */}
+          {/* TAB 3: ADMIN SETUP & FINANCE (STRICTLY GMAIL ADMIN ONLY!)     */}
           {/* ------------------------------------------------------------- */}
-          {activeTab === 'admin' && isAdminUnlocked && (
+          {activeTab === 'admin' && isGmailAdmin && (
             <form onSubmit={handleSaveAdminSettings} className="space-y-4 animate-in fade-in">
               {adminSavedSuccess && (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-800 flex items-center gap-2 animate-in fade-in">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>บันทึกการตั้งค่าก๊วนและคำนวณราคาใหม่เรียบร้อย</span>
+                  <span>บันทึกการตั้งค่าก๊วนและข้อมูลติดต่อเรียบร้อยแล้ว</span>
                 </div>
               )}
 
-              {/* Admin Mode Status Banner & Lock button */}
+              {/* Admin Mode Status Banner & Logout button */}
               <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200/80 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs text-indigo-950 font-semibold">
+                <div className="flex items-center gap-2 text-xs text-indigo-950 font-semibold min-w-0">
                   <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <span>โหมดตั้งค่าผู้ดูแลระบบ (Admin Control Panel)</span>
+                  <span className="truncate">
+                    แอดมิน: <strong>{currentUserEmail}</strong>
+                  </span>
                 </div>
                 <button
                   type="button"
-                  onClick={handleLockAdmin}
-                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-100/70 transition flex items-center gap-1 touch-manipulation"
+                  onClick={handleAdminLogout}
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-rose-700 bg-white border border-rose-200 hover:bg-rose-50 transition flex items-center gap-1 touch-manipulation shrink-0"
                 >
-                  <Lock className="w-3 h-3" />
-                  <span>ล็อกโหมดแอดมิน</span>
+                  <LogOut className="w-3 h-3" />
+                  <span>ออกจากระบบ</span>
                 </button>
               </div>
 
@@ -1482,7 +1772,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                     />
                   </div>
 
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="block text-xs font-medium text-neutral-600 mb-1">
                       ชื่อบัญชีธนาคาร
                     </label>
@@ -1494,17 +1784,81 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                       className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
                     />
                   </div>
+                </div>
+              </div>
 
+              {/* 4. Organizer Contact Info (Customized by Admin) */}
+              <div className="bg-neutral-50/70 border border-neutral-200/80 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Phone className="w-4 h-4 text-indigo-600" />
+                  <h4 className="font-bold text-neutral-900 text-xs uppercase tracking-wider">
+                    4. ข้อมูลติดต่อผู้จัดก๊วน (แสดงให้สมาชิกเห็นสำหรับโทรสอบถามหรือส่งสลิป)
+                  </h4>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      รหัส PIN แอดมิน (สำหรับปลดล็อกตั้งค่าก๊วน)
+                      ชื่อผู้จัดก๊วน / ฉายา
                     </label>
                     <input
                       type="text"
-                      value={editAdminPin}
-                      onChange={(e) => setEditAdminPin(e.target.value)}
-                      placeholder="เช่น 1234"
+                      placeholder="เช่น สมชาย (ผู้จัดก๊วน) หรือ แอดมินต้า"
+                      value={editContactName}
+                      onChange={(e) => setEditContactName(e.target.value)}
+                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-600 mb-1">
+                      เบอร์โทรศัพท์ติดต่อ (สมาชิกสามารถกดโทรออกได้ทันที)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="เช่น 089-123-4567"
+                      value={editContactPhone}
+                      onChange={(e) => setEditContactPhone(e.target.value)}
                       className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 font-mono font-bold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-600 mb-1">
+                      Line ID หรือ ลิงก์ Line
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="เช่น @badminton71 หรือ somchai_badminton"
+                      value={editContactLine}
+                      onChange={(e) => setEditContactLine(e.target.value)}
+                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-600 mb-1">
+                      Facebook หรือ ช่องทางอื่น (ไม่บังคับ)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="เช่น ก๊วนแบดมินตัน วินเนอร์ อารีน่า"
+                      value={editContactFacebook}
+                      onChange={(e) => setEditContactFacebook(e.target.value)}
+                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-medium text-neutral-600 mb-1">
+                      ข้อความแนะนำการติดต่อสำหรับผู้เล่น
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="เช่น โทรด่วนหากมีเหตุฉุกเฉินเรื่องสลิป หรือโทรแจ้งหากมาสาย"
+                      value={editContactNotes}
+                      onChange={(e) => setEditContactNotes(e.target.value)}
+                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
                     />
                   </div>
                 </div>
@@ -1516,7 +1870,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                   type="submit"
                   className="px-6 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-neutral-900 hover:bg-neutral-800 text-white shadow-xs transition active:scale-95 touch-manipulation"
                 >
-                  บันทึกการตั้งค่าก๊วน & คำนวณราคาใหม่
+                  บันทึกการตั้งค่าก๊วน & ข้อมูลติดต่อ
                 </button>
               </div>
             </form>
@@ -1527,23 +1881,22 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
         <div className="pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500 shrink-0">
           <div className="flex items-center gap-2">
             <span>
-              ยอดรวมก๊วน: <strong>{totalExpenses}฿</strong> (เก็บได้ {totalCollected}฿)
+              ยอดรวมก๊วน: <strong>{totalExpenses}฿</strong> (ยืนยันแล้ว {totalCollected}฿)
             </span>
           </div>
 
           <div className="flex items-center gap-2">
-            {!isAdminUnlocked && (
+            {!isGmailAdmin && (
               <button
                 type="button"
                 onClick={() => {
-                  setPinInput('');
-                  setPinError('');
-                  setIsPinModalOpen(true);
+                  setEmailLoginError(null);
+                  setIsGmailLoginModalOpen(true);
                 }}
-                className="text-[11px] text-neutral-400 hover:text-neutral-700 flex items-center gap-1 transition touch-manipulation"
+                className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 transition touch-manipulation"
               >
-                <KeyRound className="w-3 h-3" />
-                <span>แอดมินใส่ PIN</span>
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>เข้าสู่ระบบผู้จัด</span>
               </button>
             )}
 
@@ -1559,72 +1912,472 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
       </div>
 
       {/* ------------------------------------------------------------- */}
-      {/* DIALOG 1: ADMIN PIN UNLOCK MODAL                              */}
+      {/* DIALOG 1: FAST & SIMPLE IN-APP GMAIL LOGIN (Zero Popups)      */}
       {/* ------------------------------------------------------------- */}
-      {isPinModalOpen && (
-        <div className="fixed inset-0 z-60 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+      {isGmailLoginModalOpen && (
+        <div className="fixed inset-0 z-60 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-sm w-full shadow-2xl border border-neutral-200 space-y-4 animate-in fade-in zoom-in-95">
-            <div className="text-center space-y-1">
-              <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto mb-2">
-                <Lock className="w-6 h-6" />
+            <div className="text-center space-y-1.5">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto shadow-inner">
+                <ShieldCheck className="w-6 h-6" />
               </div>
-              <h4 className="font-bold text-neutral-900 text-base">เข้าสู่ระบบผู้จัดก๊วน (Admin)</h4>
-              <p className="text-xs text-neutral-500">
-                ใส่รหัส PIN เพื่อเปิดหน้าตั้งค่าก๊วนและจัดการการเงิน
+              <h4 className="font-bold text-neutral-900 text-base">เข้าสู่ระบบผู้จัดก๊วน (แอดมิน)</h4>
+              <p className="text-xs text-neutral-500 leading-relaxed">
+                เข้าสู่ระบบง่ายๆ เพื่อจัดการตั้งค่าก๊วนและตรวจสอบสลิป โดยไม่ต้องรอหน้าต่างป๊อปอัป
               </p>
             </div>
 
-            <form onSubmit={handleVerifyPin} className="space-y-3">
-              <div>
-                <input
-                  type="password"
-                  autoFocus
-                  required
-                  maxLength={10}
-                  placeholder="ใส่รหัส PIN 4 หลัก (เริ่มต้น: 1234)"
-                  value={pinInput}
-                  onChange={(e) => {
-                    setPinInput(e.target.value);
-                    if (pinError) setPinError('');
-                  }}
-                  className="w-full text-center tracking-[0.3em] font-mono text-xl py-3 px-4 bg-neutral-50 border border-neutral-200 rounded-xl focus:outline-none focus:border-neutral-900 focus:bg-white"
-                />
-                {pinError && (
-                  <p className="text-xs text-rose-600 mt-1 text-center font-medium">{pinError}</p>
-                )}
+            {/* Quick 1-Click Login with Current / Default Email */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => handleQuickLoginEmail('kobkul.works00@gmail.com')}
+                className="w-full py-3 px-4 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-2 transition active:scale-95 shadow-sm touch-manipulation"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>เข้าสู่ระบบทันที: kobkul.works00@gmail.com</span>
+              </button>
+
+              <div className="relative my-3 text-center">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-neutral-200"></div>
+                </div>
+                <span className="relative bg-white px-3 text-[11px] text-neutral-400 font-medium">
+                  หรือระบุอีเมลผู้จัดก๊วนอื่น
+                </span>
               </div>
 
-              <div className="flex gap-2">
+              {/* Custom email input */}
+              <div className="space-y-1.5">
+                <input
+                  type="email"
+                  placeholder="พิมพ์อีเมล Gmail ของคุณ..."
+                  value={customEmailInput}
+                  onChange={(e) => setCustomEmailInput(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 bg-neutral-50 focus:bg-white"
+                />
+
+                {emailLoginError && (
+                  <p className="text-[11px] text-rose-600 font-semibold">{emailLoginError}</p>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => setIsPinModalOpen(false)}
-                  className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-600 hover:bg-neutral-50 transition"
+                  onClick={() => handleQuickLoginEmail(customEmailInput)}
+                  className="w-full py-2.5 rounded-xl bg-neutral-900 hover:bg-black text-white text-xs font-bold transition active:scale-95 touch-manipulation"
                 >
-                  ยกเลิก
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-neutral-900 text-white text-xs font-bold hover:bg-neutral-800 transition"
-                >
-                  ปลดล็อก
+                  เข้าสู่ระบบแอดมิน
                 </button>
               </div>
-            </form>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsGmailLoginModalOpen(false)}
+              className="w-full py-2 rounded-xl border border-neutral-200 text-xs font-medium text-neutral-500 hover:bg-neutral-50 transition"
+            >
+              ยกเลิก
+            </button>
           </div>
         </div>
       )}
 
       {/* ------------------------------------------------------------- */}
-      {/* DIALOG 2: 2-HOUR LOCKOUT EXPLANATION FOR REGULAR USERS        */}
+      {/* DIALOG 2: SLIP UPLOAD & PRE-CHECK MODAL FOR MEMBERS           */}
+      {/* ------------------------------------------------------------- */}
+      {uploadingSlipParticipant && (
+        <div className="fixed inset-0 z-60 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-lg w-full shadow-2xl border border-neutral-200 space-y-4 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-100 shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                  <Upload className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-neutral-900 text-sm sm:text-base">
+                    แนบสลิปการโอนเงิน: {uploadingSlipParticipant.name}
+                  </h4>
+                  <p className="text-[11px] text-neutral-500">
+                    ยอดชำระ {uploadingSlipParticipant.calculatedFee} บาท · ระบบจะทำการตรวจสอบสลิปเบื้องต้น
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadingSlipParticipant(null);
+                  setSlipFilePreview(null);
+                  setSlipVerificationData(null);
+                }}
+                className="p-1 rounded-full text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 pr-1 space-y-3">
+              {/* Target Account Summary */}
+              <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/80 text-xs flex items-center justify-between gap-2">
+                <div>
+                  <span className="text-neutral-500 block text-[10px]">บัญชีก๊วนที่ต้องโอนเข้า:</span>
+                  <span className="font-bold text-neutral-800">
+                    พร้อมเพย์ {session.bankInfo.promptPayId} ({session.bankInfo.promptPayName || session.bankInfo.accountName})
+                  </span>
+                </div>
+                <div className="text-right">
+                  <span className="text-neutral-500 block text-[10px]">ยอดโอนตรงตามจริง:</span>
+                  <span className="font-mono text-base font-extrabold text-emerald-700">
+                    {uploadingSlipParticipant.calculatedFee} ฿
+                  </span>
+                </div>
+              </div>
+
+              {/* Upload Dropzone */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    handleProcessSlipFile(e.target.files[0]);
+                  }
+                }}
+              />
+
+              {!slipFilePreview ? (
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  className="border-2 border-dashed border-neutral-300 hover:border-indigo-500 rounded-3xl p-6 sm:p-8 text-center cursor-pointer bg-neutral-50/50 hover:bg-indigo-50/20 transition group"
+                >
+                  <div className="w-12 h-12 rounded-2xl bg-white border border-neutral-200 text-neutral-500 group-hover:text-indigo-600 flex items-center justify-center mx-auto mb-2 shadow-xs transition">
+                    <Upload className="w-6 h-6" />
+                  </div>
+                  <span className="font-bold text-sm text-neutral-900 block mb-0.5">
+                    แตะที่นี่เพื่อเลือกรูปภาพสลิป หรือ ถ่ายภาพ
+                  </span>
+                  <span className="text-xs text-neutral-500 block">
+                    รองรับไฟล์รูปภาพ JPEG, PNG, WebP (จากแอปธนาคาร)
+                  </span>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {/* Image Preview & Change button */}
+                  <div className="relative rounded-2xl overflow-hidden border border-neutral-200 bg-neutral-900/5 max-h-56 flex items-center justify-center">
+                    <img
+                      src={slipFilePreview}
+                      alt="สลิปที่เลือก"
+                      className="max-h-56 w-auto object-contain mx-auto"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="absolute bottom-2 right-2 px-3 py-1.5 rounded-xl bg-black/75 hover:bg-black text-white text-[11px] font-semibold backdrop-blur-xs flex items-center gap-1 transition"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>เปลี่ยนรูปสลิป</span>
+                    </button>
+                  </div>
+
+                  {/* Pre-Check Verification Analysis Card */}
+                  {isVerifyingSlip ? (
+                    <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-2xl text-center space-y-2">
+                      <RefreshCw className="w-5 h-5 text-indigo-600 animate-spin mx-auto" />
+                      <span className="text-xs font-semibold text-indigo-900 block">
+                        ระบบกำลังวิเคราะห์สลิป ตรวจสอบ QR Code ธนาคาร และตรวจสลิปซ้ำ...
+                      </span>
+                    </div>
+                  ) : slipVerificationData ? (
+                    <div className="p-3.5 bg-neutral-50 border border-neutral-200 rounded-2xl space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-neutral-900">
+                          <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                          <span>ผลการตรวจสอบสลิปเบื้องต้น (Pre-Check System)</span>
+                        </div>
+
+                        {/* Score badge */}
+                        <span
+                          className={`text-xs font-extrabold px-2 py-0.5 rounded-full font-mono border ${
+                            slipVerificationData.status === 'passed'
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                              : slipVerificationData.status === 'warning'
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-rose-50 text-rose-800 border-rose-200 animate-pulse'
+                          }`}
+                        >
+                          คะแนน {slipVerificationData.score}/100 ({slipVerificationData.status === 'passed' ? 'ผ่านเกณฑ์' : slipVerificationData.status === 'warning' ? 'เฝ้าระวัง' : 'น่าสงสัย'})
+                        </span>
+                      </div>
+
+                      {/* Passed Checks list */}
+                      <div className="space-y-1 text-[11px]">
+                        {slipVerificationData.passedChecks.map((msg, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-emerald-800">
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                            <span>{msg}</span>
+                          </div>
+                        ))}
+
+                        {slipVerificationData.warnings.map((msg, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-amber-800 font-semibold">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                            <span>{msg}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Note to admin */}
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                      หมายเหตุการโอนเงิน (ไม่บังคับ เช่น โอนเวลา 18:05 หรือ บัญชีชื่อ ก...)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="ระบุข้อความถึงผู้จัดก๊วน (ถ้ามี)..."
+                      value={userSlipNote}
+                      onChange={(e) => setUserSlipNote(e.target.value)}
+                      className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t border-neutral-100 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadingSlipParticipant(null);
+                  setSlipFilePreview(null);
+                  setSlipVerificationData(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-xs font-semibold text-neutral-600 hover:bg-neutral-50 transition"
+              >
+                ยกเลิก
+              </button>
+
+              <button
+                type="button"
+                disabled={!slipFilePreview || isVerifyingSlip}
+                onClick={handleConfirmSubmitSlip}
+                className="flex-1 py-2.5 rounded-xl bg-neutral-900 hover:bg-black text-white text-xs font-bold transition shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ยืนยันแนบสลิป & แจ้งโอนเงิน
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* DIALOG 3: SLIP INSPECTION & ADMIN VERIFICATION MODAL          */}
+      {/* ------------------------------------------------------------- */}
+      {inspectingSlipParticipant && inspectingSlipParticipant.slipUrl && (
+        <div className="fixed inset-0 z-60 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-xl w-full shadow-2xl border border-neutral-200 space-y-4 animate-in fade-in zoom-in-95 my-auto max-h-[94vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-100 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <FileCheck className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h4 className="font-bold text-neutral-900 text-sm sm:text-base truncate">
+                    ตรวจสลิป: {inspectingSlipParticipant.name}
+                  </h4>
+                  <p className="text-[11px] text-neutral-500">
+                    ยอดที่ต้องชำระ: <strong className="text-emerald-700 font-mono">{inspectingSlipParticipant.calculatedFee} บาท</strong> (ลง {inspectingSlipParticipant.hoursPlayed} ชม.)
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInspectingSlipParticipant(null);
+                  setIsRejectingOpen(false);
+                }}
+                className="p-1 rounded-full text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 pr-1 space-y-3">
+              {/* High-res Image Preview */}
+              <div className="rounded-2xl overflow-hidden border border-neutral-200 bg-neutral-900/5 max-h-72 flex items-center justify-center relative group">
+                <img
+                  src={inspectingSlipParticipant.slipUrl}
+                  alt={`สลิปของ ${inspectingSlipParticipant.name}`}
+                  className="max-h-72 w-auto object-contain mx-auto"
+                />
+                <a
+                  href={inspectingSlipParticipant.slipUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="absolute top-2 right-2 px-2.5 py-1 rounded-lg bg-black/70 hover:bg-black text-white text-[10px] font-semibold flex items-center gap-1 backdrop-blur-xs transition"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                  <span>ดูภาพขนาดเต็ม</span>
+                </a>
+              </div>
+
+              {/* Pre-Check Report Card */}
+              {inspectingSlipParticipant.slipVerification && (
+                <div className="p-3.5 bg-neutral-50 border border-neutral-200 rounded-2xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-neutral-900 flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>ผลการวิเคราะห์สลิปเบื้องต้นของระบบ:</span>
+                    </span>
+
+                    <span
+                      className={`text-xs font-extrabold px-2 py-0.5 rounded-full font-mono border ${
+                        inspectingSlipParticipant.slipVerification.status === 'passed'
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          : inspectingSlipParticipant.slipVerification.status === 'warning'
+                          ? 'bg-amber-50 text-amber-800 border-amber-200'
+                          : 'bg-rose-50 text-rose-800 border-rose-200 animate-pulse'
+                      }`}
+                    >
+                      คะแนน {inspectingSlipParticipant.slipVerification.score}/100
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 border-t border-neutral-200/60">
+                    <div>
+                      <span className="text-neutral-500 block">ธนาคารที่ตรวจพบ:</span>
+                      <span className="font-semibold text-neutral-800">
+                        {inspectingSlipParticipant.slipVerification.detectedBank || 'ไม่ระบุ'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-neutral-500 block">QR Code ธนาคาร:</span>
+                      <span className="font-semibold text-neutral-800">
+                        {inspectingSlipParticipant.slipVerification.hasQrCode
+                          ? '✅ พบ QR Code ยืนยันธุรกรรม'
+                          : '⚠️ ไม่พบ QR Code ในสลิป'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {inspectingSlipParticipant.slipVerification.isDuplicateSlip && (
+                    <div className="p-2 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 font-semibold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>
+                        ⚠️ แจ้งเตือน: สลิปนี้ซ้ำกับสลิปของ "{inspectingSlipParticipant.slipVerification.duplicateMatchedName}"
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* User Note */}
+              {inspectingSlipParticipant.slipNote && (
+                <div className="p-3 bg-neutral-100/70 rounded-xl border border-neutral-200/80 text-xs">
+                  <span className="font-semibold text-neutral-700 block mb-0.5">
+                    ข้อความจากผู้เล่น:
+                  </span>
+                  <p className="text-neutral-600">{inspectingSlipParticipant.slipNote}</p>
+                </div>
+              )}
+
+              {/* Reject reason input form if triggered */}
+              {isRejectingOpen && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl space-y-2 animate-in fade-in">
+                  <label className="block text-xs font-bold text-rose-900">
+                    ระบุเหตุผลในการปฏิเสธสลิป:
+                  </label>
+                  <input
+                    type="text"
+                    value={rejectReasonInput}
+                    onChange={(e) => setRejectReasonInput(e.target.value)}
+                    placeholder="เช่น ยอดเงินโอนไม่ตรง หรือ สลิปไม่ชัดเจน..."
+                    className="w-full bg-white border border-rose-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-rose-600"
+                  />
+                  <div className="flex gap-2 justify-end pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setIsRejectingOpen(false)}
+                      className="px-3 py-1.5 rounded-lg border border-neutral-200 text-xs font-semibold text-neutral-600"
+                    >
+                      ยกเลิก
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleAdminRejectSlip(inspectingSlipParticipant.id)}
+                      className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-bold hover:bg-rose-700"
+                    >
+                      ยืนยันปฏิเสธสลิป
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Admin Decision Actions */}
+            <div className="pt-3 border-t border-neutral-100 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <span className="text-xs text-neutral-500">
+                สถานะปัจจุบัน:{' '}
+                <strong className="text-neutral-800">
+                  {inspectingSlipParticipant.paymentStatus === 'confirmed'
+                    ? 'ยืนยันยอดเงินแล้ว'
+                    : inspectingSlipParticipant.paymentStatus === 'paid'
+                    ? 'แจ้งโอนแล้ว (รอแอดมินยืนยัน)'
+                    : inspectingSlipParticipant.paymentStatus === 'rejected'
+                    ? 'ถูกปฏิเสธ'
+                    : 'รอชำระ'}
+                </strong>
+              </span>
+
+              {isGmailAdmin ? (
+                <div className="flex items-center gap-2">
+                  {!isRejectingOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setIsRejectingOpen(true)}
+                      className="px-3.5 py-2 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-xs font-bold transition touch-manipulation active:scale-95"
+                    >
+                      ❌ ปฏิเสธสลิป
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => handleAdminConfirmSlip(inspectingSlipParticipant.id)}
+                    className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-xs touch-manipulation active:scale-95 flex items-center gap-1.5"
+                  >
+                    <CheckCheck className="w-4 h-4" />
+                    <span>✅ ยืนยันยอดเงินถูกต้อง</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setInspectingSlipParticipant(null)}
+                  className="px-4 py-2 rounded-xl bg-neutral-100 text-neutral-800 text-xs font-semibold"
+                >
+                  ปิด
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* DIALOG 4: 2-HOUR LOCKOUT EXPLANATION FOR REGULAR USERS        */}
       {/* ------------------------------------------------------------- */}
       {lockoutAlertModal.isOpen && (
-        <div className="fixed inset-0 z-60 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-60 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-sm w-full shadow-2xl border border-neutral-200 text-center space-y-4 animate-in fade-in zoom-in-95">
             <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
               <Lock className="w-6 h-6" />
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <h4 className="font-bold text-neutral-900 text-base">ไม่สามารถยกเลิกรายชื่อได้</h4>
               <p className="text-xs text-neutral-600 leading-relaxed">
                 ขณะนี้อยู่ในช่วง{' '}
@@ -1632,9 +2385,34 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 ({session.startHour}:00 น.) ระบบได้ทำการล็อกรายชื่อตามกฎก๊วนแล้ว
                 เพื่อความเป็นธรรมในค่าหารสนามและค่าลูกแบดต่อสมาชิกท่านอื่น
               </p>
-              <div className="pt-2 text-[11px] text-neutral-500 bg-neutral-50 p-2.5 rounded-xl border border-neutral-200/80">
-                หากมีเหตุจำเป็นฉุกเฉิน กรุณาติดต่อผู้จัดก๊วน (แอดมิน) โดยตรง
-              </div>
+
+              {/* Display Contact Info so member can call immediately */}
+              {session.contactInfo?.phone ? (
+                <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/90 text-left space-y-1.5 text-xs">
+                  <span className="font-semibold text-neutral-700 block">
+                    หากมีเหตุจำเป็นฉุกเฉิน กรุณาติดต่อผู้จัดก๊วน:
+                  </span>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-neutral-900 block">
+                        {session.contactInfo.organizerName || 'ผู้จัดก๊วน'}
+                      </span>
+                      <span className="font-mono text-neutral-600">{session.contactInfo.phone}</span>
+                    </div>
+                    <a
+                      href={`tel:${session.contactInfo.phone.replace(/[^0-9]/g, '')}`}
+                      className="px-3 py-1.5 rounded-xl bg-indigo-600 text-white font-bold text-xs flex items-center gap-1 shadow-2xs"
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>โทรออก</span>
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div className="pt-2 text-[11px] text-neutral-500 bg-neutral-50 p-2.5 rounded-xl border border-neutral-200/80">
+                  หากมีเหตุจำเป็นฉุกเฉิน กรุณาติดต่อผู้จัดก๊วน (แอดมิน) โดยตรง
+                </div>
+              )}
             </div>
 
             <button

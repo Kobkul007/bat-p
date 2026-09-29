@@ -13,6 +13,23 @@ export interface MeetupTimeSlot {
   endHour: number; // 19
 }
 
+export interface SlipVerificationResult {
+  isValidImage: boolean;
+  hasQrCode: boolean;
+  qrPayload?: string;
+  isDuplicateSlip: boolean;
+  duplicateMatchedName?: string;
+  fileSizeKb: number;
+  imageDimensions: { width: number; height: number };
+  detectedBank?: string; // e.g. "กสิกรไทย (KBANK)", "ไทยพาณิชย์ (SCB)", "กรุงไทย (KTB)", "กรุงเทพ (BBL)", "พร้อมเพย์"
+  aspectRatio: number;
+  score: number; // 0-100 authenticity score
+  status: 'passed' | 'warning' | 'flagged';
+  passedChecks: string[];
+  warnings: string[];
+  analyzedAt: number;
+}
+
 export interface MeetupParticipant {
   id: string;
   name: string; // Participant's display name
@@ -20,12 +37,25 @@ export interface MeetupParticipant {
   hoursPlayed: number; // Total hours (e.g. 1, 2, 3)
   selectedSlotIds: string[]; // e.g. ["slot-18-19", "slot-19-20"]
   calculatedFee: number; // Total fee in THB
-  paymentStatus: 'pending' | 'paid' | 'confirmed';
+  paymentStatus: 'pending' | 'paid' | 'confirmed' | 'rejected';
   paymentMethod: 'promptpay' | 'bank_transfer' | 'cash';
   registeredAt: number;
   paidAt?: number;
+  slipUrl?: string; // Base64 or image data URL of the transfer slip
+  slipVerification?: SlipVerificationResult;
   slipNote?: string;
+  slipUploadedAt?: number;
+  slipFingerprint?: string; // Hash signature for duplicate detection
+  adminRejectReason?: string;
   addedToMatchQueue?: boolean; // Synced with court queue
+}
+
+export interface OrganizerContactInfo {
+  phone?: string; // e.g. "089-123-4567"
+  lineId?: string; // e.g. "somchai_badminton" or "@badminton71"
+  facebook?: string; // e.g. "ก๊วนแบดวันอังคาร"
+  organizerName?: string; // e.g. "พี่สมชาย ผู้จัดก๊วน"
+  notes?: string; // e.g. "ติดต่อด่วนหากมีเหตุจำเป็นเรื่องสลิปหรือยกเลิก"
 }
 
 export interface MeetupSession {
@@ -45,6 +75,7 @@ export interface MeetupSession {
   totalShuttlecockFee: number; // price * count
   splitMethod: 'equal_all' | 'per_hour';
   bankInfo: BankPaymentInfo;
+  contactInfo?: OrganizerContactInfo;
   status: 'open' | 'full' | 'closed';
   notes: string;
   participants: MeetupParticipant[];

@@ -40,6 +40,13 @@ export const DEFAULT_MEETUP_SESSION: MeetupSession = {
     promptPayId: '0891234567',
     promptPayName: 'สมชาย แอดมินก๊วน',
   },
+  contactInfo: {
+    phone: '089-123-4567',
+    lineId: '@badminton71',
+    facebook: 'ก๊วนแบดมินตัน วินเนอร์ อารีน่า',
+    organizerName: 'สมชาย (ผู้จัดก๊วน)',
+    notes: 'ติดต่อด่วนหากมีเหตุจำเป็นเรื่องสลิป หรือโทรแจ้งหากมาสาย',
+  },
   adminPin: '1234',
   status: 'open',
   notes: 'นำไม้แบดและรองเท้าแบดมินตันมาเอง ลูกแบด RSL Silver จัดเตรียมไว้ให้',
@@ -78,6 +85,67 @@ export const DEFAULT_MEETUP_SESSION: MeetupSession = {
       paymentMethod: 'promptpay',
       registeredAt: Date.now() - 3600000 * 2,
       paidAt: Date.now() - 3600000 * 1,
+      slipUrl: `data:image/svg+xml;utf8,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="580" viewBox="0 0 360 580">
+  <defs>
+    <linearGradient id="kbankHeader" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#056b3b"/>
+      <stop offset="100%" stop-color="#0a8047"/>
+    </linearGradient>
+  </defs>
+  <rect width="360" height="580" fill="#ffffff" rx="20"/>
+  <rect width="360" height="135" fill="url(#kbankHeader)"/>
+  <text x="180" y="45" font-family="sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">K PLUS</text>
+  <text x="180" y="75" font-family="sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">โอนเงินสำเร็จ</text>
+  <text x="180" y="102" font-family="sans-serif" font-size="11" fill="#e0f2fe" text-anchor="middle">29 ก.ย. 2569 - 17:35 น.</text>
+
+  <text x="40" y="175" font-family="sans-serif" font-size="11" fill="#888888">จาก</text>
+  <text x="40" y="195" font-family="sans-serif" font-size="13" font-weight="bold" fill="#111111">นายต้นกล้า (ผู้เล่นก๊วน)</text>
+  <text x="40" y="213" font-family="sans-serif" font-size="11" fill="#666666">กสิกรไทย xxx-x-x1482-x</text>
+
+  <text x="40" y="255" font-family="sans-serif" font-size="11" fill="#888888">ไปยัง</text>
+  <text x="40" y="275" font-family="sans-serif" font-size="13" font-weight="bold" fill="#111111">สมชาย จัดก๊วนแบดมินตัน</text>
+  <text x="40" y="293" font-family="sans-serif" font-size="11" fill="#666666">พร้อมเพย์ 089-123-4567</text>
+
+  <line x1="30" y1="325" x2="330" y2="325" stroke="#e5e7eb" stroke-width="1"/>
+
+  <text x="40" y="365" font-family="sans-serif" font-size="12" fill="#555555">จำนวนเงิน</text>
+  <text x="320" y="370" font-family="sans-serif" font-size="24" font-weight="bold" fill="#056b3b" text-anchor="end">260.00 บาท</text>
+
+  <line x1="30" y1="405" x2="330" y2="405" stroke="#e5e7eb" stroke-width="1"/>
+
+  <rect x="130" y="430" width="100" height="100" fill="#f8fafc" stroke="#e2e8f0" rx="10"/>
+  <rect x="142" y="442" width="22" height="22" fill="#0f172a"/>
+  <rect x="196" y="442" width="22" height="22" fill="#0f172a"/>
+  <rect x="142" y="496" width="22" height="22" fill="#0f172a"/>
+  <rect x="176" y="476" width="10" height="10" fill="#0f172a"/>
+  <text x="180" y="550" font-family="sans-serif" font-size="9" fill="#94a3b8" text-anchor="middle">สแกนตรวจสอบสลิป (QR)</text>
+</svg>
+      `)}`,
+      slipVerification: {
+        isValidImage: true,
+        hasQrCode: true,
+        isDuplicateSlip: false,
+        fileSizeKb: 142,
+        imageDimensions: { width: 360, height: 580 },
+        detectedBank: 'กสิกรไทย (K PLUS / KBANK)',
+        aspectRatio: 0.62,
+        score: 95,
+        status: 'passed',
+        passedChecks: [
+          'ความละเอียดของภาพคมชัด (360 × 580 พิกเซล)',
+          'สัดส่วนภาพเป็นแนวตั้งตามมาตรฐานสลิปโมบายแบงก์กิ้ง (Portrait Slip)',
+          'ไม่พบการใช้ภาพสลิปซ้ำกับสมาชิกท่านอื่นในก๊วน (No Duplicate)',
+          'สแกนตรวจพบ QR Code ยืนยันธุรกรรมของธนาคารในตัวสลิป (Bank Verified QR)',
+          'ตรวจพบลักษณะธีมธนาคาร: กสิกรไทย (K PLUS / KBANK)',
+          'ยอดที่ต้องชำระตามระบบ: 260 บาท (ตรงตามยอดโอน 260.00 บาท)',
+        ],
+        warnings: [],
+        analyzedAt: Date.now() - 3600000,
+      },
+      slipFingerprint: '11110000111100001111000011110000',
+      slipNote: 'โอนยอด 260 บาท 3 ชั่วโมง เรียบร้อยครับ จากกสิกร',
+      slipUploadedAt: Date.now() - 3600000,
       addedToMatchQueue: false,
     },
     {
