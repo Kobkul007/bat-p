@@ -174,8 +174,8 @@ export const GoogleSheetsModal: React.FC<GoogleSheetsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="bg-white border border-black/[0.08] rounded-3xl max-w-md w-full p-6 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.18)] animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-black/[0.08] rounded-3xl max-w-md w-full p-4 sm:p-6 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.18)] animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[94vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-neutral-100">
           <div className="flex items-center gap-2.5">

@@ -10,6 +10,8 @@ import { QueueManager } from './components/QueueManager';
 import { HistoryLog } from './components/HistoryLog';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { GoogleSheetsModal } from './components/GoogleSheetsModal';
+import { AdminDashboard } from './components/AdminDashboard';
+import { Users, History, Trophy, FileSpreadsheet, LayoutGrid, ShieldCheck } from 'lucide-react';
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>(() => loadAppState());
@@ -19,6 +21,10 @@ export default function App() {
   // Modals
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState(false);
   const [isSheetsOpen, setIsSheetsOpen] = useState(false);
+  const [isAdminView, setIsAdminView] = useState(false);
+
+  // Mobile navigation tab ('court' | 'queue' | 'history' | 'all')
+  const [mobileTab, setMobileTab] = useState<'court' | 'queue' | 'history' | 'all'>('court');
 
   // Toast / Status banner
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'warn' } | null>(null);
@@ -579,11 +585,13 @@ export default function App() {
         onToggleSound={() => setSoundEnabled(!soundEnabled)}
         sheetsConnected={Boolean(sheetsConfig.spreadsheetId)}
         sheetTitle={sheetsConfig.spreadsheetTitle}
+        isAdminView={isAdminView}
+        onToggleAdminView={() => setIsAdminView((prev) => !prev)}
       />
 
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
+        <div className="fixed bottom-[calc(max(env(safe-area-inset-bottom),12px)+64px)] sm:bottom-6 right-3 sm:right-6 z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
           <div className={`px-4 py-2.5 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.12)] text-xs sm:text-sm font-medium flex items-center gap-2.5 border backdrop-blur-md ${
             toastMessage.type === 'success'
               ? 'bg-white/95 text-emerald-700 border-emerald-200'
@@ -600,50 +608,257 @@ export default function App() {
       )}
 
       {/* Main Container */}
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 flex-1 w-full space-y-6">
-        {/* Core Court Arena */}
-        <CourtView
-          court={appState.court}
-          queue={appState.queue}
-          onResolveMatch={handleResolveMatch}
-          onSwapSides={handleSwapSides}
-          onSeatNextChallenger={handleSeatNextChallenger}
-          onSubToRest={handleSubToRest}
-          onClearCourt={() => {}}
-        />
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-3 sm:py-6 flex-1 w-full space-y-4 sm:space-y-6 pb-28 lg:pb-8">
+        {isAdminView ? (
+          <AdminDashboard
+            appState={appState}
+            setAppState={setAppState}
+            sheetsConfig={sheetsConfig}
+            onOpenSheets={() => setIsSheetsOpen(true)}
+            onBackToCourt={() => setIsAdminView(false)}
+            showToast={showToast}
+          />
+        ) : (
+          <>
+            {/* Mobile Apple-Style Segmented Tab Bar (Visible on mobile/tablet screens) */}
+            <div className="lg:hidden sticky top-14 sm:top-16 z-30 -mx-3 sm:-mx-6 px-3 sm:px-6 py-2 bg-[#f5f5f7]/95 backdrop-blur-md border-b border-black/[0.05]">
+              <div className="grid grid-cols-4 bg-neutral-200/80 p-1 rounded-2xl text-xs font-medium gap-1">
+                <button
+                  onClick={() => setMobileTab('court')}
+                  className={`py-2 rounded-xl flex items-center justify-center gap-1.5 transition touch-manipulation active:scale-95 ${
+                    mobileTab === 'court'
+                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                >
+                  <span>🏸 คอร์ต</span>
+                  {appState.court.status === 'ACTIVE' && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  )}
+                </button>
 
-        {/* Queue Management & Match History Split Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left Column: Challenger Queue & Resting Bench (7 cols) */}
-          <div className="lg:col-span-7">
-            <QueueManager
-              queue={appState.queue}
-              restingPairs={appState.restingPairs}
-              canSeatDirectly={!appState.court.teamA || !appState.court.teamB}
-              onAddPair={handleAddPair}
-              onAddPresets={handleAddPresets}
-              onMoveUp={handleMoveUp}
-              onMoveDown={handleMoveDown}
-              onMoveToRest={handleMoveToRest}
-              onReturnFromRest={handleReturnFromRest}
-              onRemovePair={handleRemovePair}
-              onSeatPairDirectly={handleSeatPairDirectly}
-              onEditPairName={handleEditPairName}
-              onShuffleQueue={handleShuffleQueue}
-            />
-          </div>
+                <button
+                  onClick={() => setMobileTab('queue')}
+                  className={`py-2 rounded-xl flex items-center justify-center gap-1.5 transition touch-manipulation active:scale-95 ${
+                    mobileTab === 'queue'
+                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                >
+                  <span>คิว</span>
+                  <span className="px-1.5 py-0.2 bg-neutral-200 text-neutral-700 rounded-full text-[10px] font-bold">
+                    {appState.queue.length}
+                  </span>
+                </button>
 
-          {/* Right Column: Match History Log (5 cols) */}
-          <div className="lg:col-span-5">
-            <HistoryLog
-              history={appState.historyLog}
-              onExportCsv={() => googleSheetsService.downloadCsv(appState.historyLog, allCurrentPairs)}
-              onOpenSheets={() => setIsSheetsOpen(true)}
-              sheetsConnected={Boolean(sheetsConfig.spreadsheetId)}
-            />
+                <button
+                  onClick={() => setMobileTab('history')}
+                  className={`py-2 rounded-xl flex items-center justify-center gap-1.5 transition touch-manipulation active:scale-95 ${
+                    mobileTab === 'history'
+                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                >
+                  <span>ประวัติ</span>
+                  {appState.historyLog.length > 0 && (
+                    <span className="px-1.5 py-0.2 bg-neutral-200 text-neutral-700 rounded-full text-[10px] font-bold">
+                      {appState.historyLog.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setMobileTab('all')}
+                  className={`py-2 rounded-xl flex items-center justify-center gap-1 transition touch-manipulation active:scale-95 ${
+                    mobileTab === 'all'
+                      ? 'bg-white text-neutral-900 shadow-sm font-semibold'
+                      : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                >
+                  <span>ทั้งหมด</span>
+                </button>
+              </div>
+            </div>
+
+            {/* View Layout - Responsive for Mobile & Desktop */}
+            <div className="space-y-5">
+              {/* Core Court Arena (Always on Desktop, conditional on Mobile) */}
+              <div className={`${mobileTab === 'court' || mobileTab === 'all' ? 'block' : 'hidden lg:block'}`}>
+                <CourtView
+                  court={appState.court}
+                  queue={appState.queue}
+                  onResolveMatch={handleResolveMatch}
+                  onSwapSides={handleSwapSides}
+                  onSeatNextChallenger={handleSeatNextChallenger}
+                  onSubToRest={handleSubToRest}
+                  onClearCourt={() => {}}
+                />
+              </div>
+
+              {/* Queue Management & Match History Split Layout */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-start">
+                {/* Left Column: Challenger Queue & Resting Bench (7 cols) */}
+                <div className={`lg:col-span-7 ${mobileTab === 'queue' || mobileTab === 'all' ? 'block' : 'hidden lg:block'}`}>
+                  <QueueManager
+                    queue={appState.queue}
+                    restingPairs={appState.restingPairs}
+                    canSeatDirectly={!appState.court.teamA || !appState.court.teamB}
+                    onAddPair={handleAddPair}
+                    onAddPresets={handleAddPresets}
+                    onMoveUp={handleMoveUp}
+                    onMoveDown={handleMoveDown}
+                    onMoveToRest={handleMoveToRest}
+                    onReturnFromRest={handleReturnFromRest}
+                    onRemovePair={handleRemovePair}
+                    onSeatPairDirectly={handleSeatPairDirectly}
+                    onEditPairName={handleEditPairName}
+                    onShuffleQueue={handleShuffleQueue}
+                  />
+                </div>
+
+                {/* Right Column: Match History Log (5 cols) */}
+                <div className={`lg:col-span-5 ${mobileTab === 'history' || mobileTab === 'all' ? 'block' : 'hidden lg:block'}`}>
+                  <HistoryLog
+                    history={appState.historyLog}
+                    onExportCsv={() => googleSheetsService.downloadCsv(appState.historyLog, allCurrentPairs)}
+                    onOpenSheets={() => setIsSheetsOpen(true)}
+                    sheetsConnected={Boolean(sheetsConfig.spreadsheetId)}
+                  />
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </main>
+
+      {/* Mobile Floating Sticky Quick Status Bar when active & in Queue/History tab */}
+      {!isAdminView && mobileTab !== 'court' && mobileTab !== 'all' && appState.court.status === 'ACTIVE' && appState.court.teamA && appState.court.teamB && (
+        <div className="lg:hidden fixed bottom-[calc(max(env(safe-area-inset-bottom),10px)+58px)] inset-x-3 z-30 animate-in fade-in slide-in-from-bottom-2 duration-150">
+          <div
+            onClick={() => setMobileTab('court')}
+            className="p-3 bg-[#1d1d1f] text-white rounded-2xl shadow-[0_10px_25px_rgba(0,0,0,0.25)] flex items-center justify-between cursor-pointer border border-neutral-700/60 active:scale-[0.98] transition"
+          >
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <div className="min-w-0">
+                <span className="text-[11px] text-neutral-400 block font-normal">กำลังแข่งขันในคอร์ต</span>
+                <span className="text-xs font-semibold truncate block">
+                  {appState.court.teamA.name} vs {appState.court.teamB.name}
+                </span>
+              </div>
+            </div>
+            <span className="text-xs font-medium text-amber-400 bg-white/10 px-3 py-1.5 rounded-xl shrink-0">
+              แตะดูกระดานคะแนน 🏸
+            </span>
           </div>
         </div>
-      </main>
+      )}
+
+      {/* Mobile Ergonomic Bottom Navigation Bar (Dock) */}
+      <nav aria-label="แถบเมนูนำทางหลักบนมือถือ" className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white/90 backdrop-blur-xl border-t border-black/[0.08] shadow-[0_-4px_25px_rgba(0,0,0,0.06)] pb-[max(env(safe-area-inset-bottom),10px)] pt-1.5 px-1.5">
+        <div className="grid grid-cols-6 items-center max-w-lg mx-auto">
+          {/* 1. Court Tab */}
+          <button
+            onClick={() => {
+              setIsAdminView(false);
+              setMobileTab('court');
+            }}
+            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              !isAdminView && mobileTab === 'court' ? 'text-neutral-950 font-semibold' : 'text-neutral-500 hover:text-neutral-800'
+            }`}
+          >
+            <div className="relative">
+              <span className="text-base sm:text-lg">🏸</span>
+              {appState.court.status === 'ACTIVE' && (
+                <span className="absolute -top-0.5 -right-1 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-600"></span>
+                </span>
+              )}
+            </div>
+            <span className="text-[9.5px] mt-0.5">คอร์ต</span>
+          </button>
+
+          {/* 2. Queue Tab */}
+          <button
+            onClick={() => {
+              setIsAdminView(false);
+              setMobileTab('queue');
+            }}
+            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              !isAdminView && mobileTab === 'queue' ? 'text-neutral-950 font-semibold' : 'text-neutral-500 hover:text-neutral-800'
+            }`}
+          >
+            <div className="relative">
+              <Users className="w-4 h-4 sm:w-5 sm:h-5" />
+              {appState.queue.length > 0 && (
+                <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-neutral-900 text-white rounded-full text-[8.5px] font-bold flex items-center justify-center">
+                  {appState.queue.length}
+                </span>
+              )}
+            </div>
+            <span className="text-[9.5px] mt-0.5">คิว</span>
+          </button>
+
+          {/* 3. History Tab */}
+          <button
+            onClick={() => {
+              setIsAdminView(false);
+              setMobileTab('history');
+            }}
+            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              !isAdminView && mobileTab === 'history' ? 'text-neutral-950 font-semibold' : 'text-neutral-500 hover:text-neutral-800'
+            }`}
+          >
+            <div className="relative">
+              <History className="w-4 h-4 sm:w-5 sm:h-5" />
+              {appState.historyLog.length > 0 && (
+                <span className="absolute -top-1 -right-2 px-1 py-0.2 min-w-[14px] h-[14px] bg-neutral-200 text-neutral-800 rounded-full text-[8.5px] font-bold flex items-center justify-center">
+                  {appState.historyLog.length}
+                </span>
+              )}
+            </div>
+            <span className="text-[9.5px] mt-0.5">ประวัติ</span>
+          </button>
+
+          {/* 4. Leaderboard Tab */}
+          <button
+            onClick={() => setIsLeaderboardOpen(true)}
+            className="flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 text-neutral-500 hover:text-neutral-800"
+          >
+            <Trophy className="w-4 h-4 sm:w-5 sm:h-5 text-amber-500" />
+            <span className="text-[9.5px] mt-0.5">อันดับ</span>
+          </button>
+
+          {/* 5. Google Sheets Tab */}
+          <button
+            onClick={() => setIsSheetsOpen(true)}
+            className="flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 text-neutral-500 hover:text-neutral-800 relative"
+          >
+            <div className="relative">
+              <FileSpreadsheet className={`w-4 h-4 sm:w-5 sm:h-5 ${sheetsConfig.spreadsheetId ? 'text-emerald-600' : 'text-neutral-500'}`} />
+              {sheetsConfig.spreadsheetId && (
+                <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-500"></span>
+              )}
+            </div>
+            <span className="text-[9.5px] mt-0.5">ชีต</span>
+          </button>
+
+          {/* 6. Admin Backoffice Tab */}
+          <button
+            onClick={() => setIsAdminView(!isAdminView)}
+            className={`flex flex-col items-center justify-center py-1 rounded-xl transition touch-manipulation active:scale-95 relative ${
+              isAdminView ? 'text-indigo-600 font-bold' : 'text-neutral-500 hover:text-neutral-800'
+            }`}
+          >
+            <div className="relative">
+              <ShieldCheck className={`w-4 h-4 sm:w-5 sm:h-5 ${isAdminView ? 'text-indigo-600' : 'text-neutral-500'}`} />
+              <span className={`w-1.5 h-1.5 rounded-full absolute -top-0.5 -right-1 ${isAdminView ? 'bg-indigo-600' : 'bg-transparent'}`} />
+            </div>
+            <span className="text-[9.5px] mt-0.5">แอดมิน</span>
+          </button>
+        </div>
+      </nav>
 
       {/* Minimal Apple-Style Footer */}
       <footer className="border-t border-black/[0.06] bg-[#f5f5f7] py-6 text-center text-xs text-neutral-500">

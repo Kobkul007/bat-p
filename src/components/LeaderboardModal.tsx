@@ -66,68 +66,68 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="bg-white border border-black/[0.08] rounded-3xl max-w-lg w-full p-6 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.18)] animate-in fade-in zoom-in-95 duration-150">
-        <div className="flex items-center justify-between pb-4 border-b border-neutral-100">
+    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-black/[0.08] rounded-3xl max-w-lg w-full p-4 sm:p-6 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.18)] animate-in fade-in zoom-in-95 duration-150 my-auto">
+        <div className="flex items-center justify-between pb-3.5 border-b border-neutral-100">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-2xl bg-amber-50 text-amber-600 border border-amber-200/60 flex items-center justify-center">
+            <div className="w-8 sm:w-9 h-8 sm:h-9 rounded-2xl bg-amber-50 text-amber-600 border border-amber-200/60 flex items-center justify-center shrink-0">
               <Trophy className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-base font-semibold text-[#1d1d1f]">ตารางอันดับผู้เล่น (Leaderboard)</h3>
-              <p className="text-xs text-neutral-500">จัดอันดับตามจำนวนเกมที่ชนะและสถิติการเล่น</p>
+              <h3 className="text-sm sm:text-base font-semibold text-[#1d1d1f]">ตารางอันดับผู้เล่น (Leaderboard)</h3>
+              <p className="text-[11px] sm:text-xs text-neutral-500">จัดอันดับตามจำนวนเกมที่ชนะและสถิติการเล่น</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-full text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition"
+            className="p-1.5 rounded-full text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition touch-manipulation"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Standings Table */}
-        <div className="mt-4 max-h-[380px] overflow-y-auto">
+        {/* Standings Table with horizontal scroll on small devices */}
+        <div className="mt-3.5 max-h-[420px] overflow-y-auto overflow-x-auto">
           {sortedList.length === 0 ? (
             <p className="text-xs text-neutral-400 text-center py-8">ยังไม่มีรายชื่อผู้เล่นในรอบนี้</p>
           ) : (
-            <table className="w-full text-left text-xs">
+            <table className="w-full text-left text-xs min-w-[380px]">
               <thead>
-                <tr className="border-b border-neutral-100 text-neutral-400 text-[11px] font-medium uppercase tracking-wider">
-                  <th className="py-2.5 px-3">อันดับ</th>
-                  <th className="py-2.5 px-3">ชื่อคู่ผู้เล่น</th>
-                  <th className="py-2.5 px-3 text-center">ชนะ</th>
-                  <th className="py-2.5 px-3 text-center">เล่นทั้งหมด</th>
-                  <th className="py-2.5 px-3 text-center">ชนะติด</th>
-                  <th className="py-2.5 px-3 text-right">สถานะ</th>
+                <tr className="border-b border-neutral-100 text-neutral-400 text-[10px] sm:text-[11px] font-medium uppercase tracking-wider sticky top-0 bg-white">
+                  <th className="py-2.5 px-2.5 sm:px-3">อันดับ</th>
+                  <th className="py-2.5 px-2.5 sm:px-3">ชื่อคู่ผู้เล่น</th>
+                  <th className="py-2.5 px-2 text-center">ชนะ</th>
+                  <th className="py-2.5 px-2 text-center">แข่ง</th>
+                  <th className="py-2.5 px-2 text-center">ชนะติด</th>
+                  <th className="py-2.5 px-2.5 sm:px-3 text-right">สถานะ</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
                 {sortedList.map((item, idx) => {
                   return (
                     <tr key={item.pair.id} className="hover:bg-neutral-50/80 transition">
-                      <td className="py-3 px-3 font-medium text-neutral-600">
+                      <td className="py-2.5 sm:py-3 px-2.5 sm:px-3 font-medium text-neutral-600">
                         {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`}
                       </td>
-                      <td className="py-3 px-3 font-medium text-[#1d1d1f]">
+                      <td className="py-2.5 sm:py-3 px-2.5 sm:px-3 font-semibold text-[#1d1d1f]">
                         <div className="flex items-center gap-1.5">
-                          <span>{item.pair.name}</span>
+                          <span className="truncate max-w-[120px] sm:max-w-[180px]">{item.pair.name}</span>
                           {item.pair.consecutiveWins > 0 && (
-                            <Crown className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                            <Crown className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
                           )}
                         </div>
                       </td>
-                      <td className="py-3 px-3 text-center font-semibold text-emerald-600">
+                      <td className="py-2.5 sm:py-3 px-2 text-center font-bold text-emerald-600">
                         {item.wins}
                       </td>
-                      <td className="py-3 px-3 text-center text-neutral-600">
+                      <td className="py-2.5 sm:py-3 px-2 text-center text-neutral-600">
                         {item.totalMatches}
                       </td>
-                      <td className="py-3 px-3 text-center font-medium text-amber-600">
+                      <td className="py-2.5 sm:py-3 px-2 text-center font-medium text-amber-600">
                         {item.pair.consecutiveWins}
                       </td>
-                      <td className="py-3 px-3 text-right">
-                        <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-medium ${
+                      <td className="py-2.5 sm:py-3 px-2.5 sm:px-3 text-right">
+                        <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
                           item.pair.status === 'playing'
                             ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/80'
                             : item.pair.status === 'waiting'
@@ -145,10 +145,10 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
           )}
         </div>
 
-        <div className="mt-5 pt-3 border-t border-neutral-100 flex justify-end">
+        <div className="mt-4 pt-3 border-t border-neutral-100 flex justify-end">
           <button
             onClick={onClose}
-            className="px-5 py-2 rounded-full text-xs font-medium bg-[#1d1d1f] text-white hover:bg-neutral-800 transition shadow-sm"
+            className="px-6 py-2.5 min-h-[44px] rounded-full text-xs font-semibold bg-[#1d1d1f] text-white hover:bg-neutral-800 transition shadow-sm touch-manipulation active:scale-95"
           >
             ปิด
           </button>
