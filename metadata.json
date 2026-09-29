@@ -1,0 +1,6 @@
+{
+  "name": "SmashQueue - King of the Court Badminton",
+  "description": "Production badminton court queue management with King of the Court (Max 2 Wins) rule, live scoreboard, and Google Sheets integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
