@@ -15,40 +15,56 @@ import {
   CheckCheck,
   Lock,
   AlertTriangle,
-  UserCheck,
-  UserPlus,
-  ShieldCheck,
   Upload,
+  RefreshCw,
+  Eye,
   FileCheck,
   FileX,
-  Eye,
-  LogOut,
-  Mail,
-  ZoomIn,
-  RefreshCw,
+  ShieldCheck,
   Phone,
   MessageCircle,
+  Share2,
+  UserPlus,
+  UserCheck,
   Sparkles,
+  Download,
+  Link2,
+  Unlink,
+  ZoomIn,
+  KeyRound,
+  LogIn,
+  LogOut,
+  Info
 } from 'lucide-react';
-import { MeetupSession, MeetupParticipant, MeetupTimeSlot, SlipVerificationResult } from '../types/meetup';
+import {
+  MeetupSession,
+  MeetupParticipant,
+  MeetupTimeSlot,
+  SlipVerificationResult,
+} from '../types/meetup';
 import {
   generateTimeSlots,
-  estimateParticipantFee,
   recalculateAllParticipantFees,
+  estimateParticipantFee,
 } from '../utils/meetupStorage';
-import { generatePromptPayQRDataUrl } from '../utils/promptpay';
+import {
+  generatePromptPayQRDataUrl,
+  formatPromptPayDisplay,
+  validatePromptPayTarget,
+} from '../utils/promptpay';
 import { verifySlipImage } from '../utils/slipVerification';
 import { googleSheetsService } from '../services/googleSheets';
-import { loadAdminConfig, isUserAuthorized, DEFAULT_CREATOR_EMAIL } from '../utils/storage';
+import { loadAdminConfig, isUserAuthorized } from '../utils/storage';
 import { sounds } from '../services/soundEffects';
 
 interface MeetupGroupModalProps {
   isOpen: boolean;
   onClose: () => void;
   session: MeetupSession;
-  onUpdateSession: (newSession: MeetupSession) => void;
+  onUpdateSession: (updated: MeetupSession) => void;
   onAddParticipantToQueue: (name: string) => void;
   isAdmin: boolean;
+  asEmbeddedView?: boolean;
 }
 
 export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
@@ -58,41 +74,46 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
   onUpdateSession,
   onAddParticipantToQueue,
   isAdmin: isParentAdmin,
+  asEmbeddedView = false,
 }) => {
   // Navigation Tabs:
   // - 'join': ลงชื่อสมาชิก & บัตรสแกนจ่ายเงินรายบุคคล (พร้อมแนบสลิป)
   // - 'roster': รายชื่อก๊วน & ตรวจสอบสลิป (พร้อมกฎห้ามลบชื่อ 2 ชม. ก่อนเริ่ม)
-  // - 'admin': ตั้งค่าก๊วน & ข้อมูลติดต่อผู้จัด (เฉพาะ Gmail แอดมินเท่านั้น!)
+  // - 'admin': ตั้งค่าก๊วน & ข้อมูลติดต่อผู้จัด (เฉพาะแอดมินที่มีสิทธิ์เท่านั้น)
   const [activeTab, setActiveTab] = useState<'join' | 'roster' | 'admin'>('join');
 
   // -------------------------------------------------------------
-  // GMAIL ADMIN AUTHENTICATION (FAST & SIMPLE IN-APP LOGIN)
+  // SECURE ADMIN AUTHENTICATION (NO PRE-FILLED / EXPOSED EMAILS)
   // -------------------------------------------------------------
   const [adminConfig] = useState(() => loadAdminConfig());
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(() => {
     return googleSheetsService.getUserEmail() || localStorage.getItem('smashqueue_meetup_admin_email') || null;
   });
-  const [currentUserName, setCurrentUserName] = useState<string | null>(() => googleSheetsService.getUserName());
-  const [isGmailLoginModalOpen, setIsGmailLoginModalOpen] = useState(false);
-  const [customEmailInput, setCustomEmailInput] = useState('kobkul.works00@gmail.com');
-  const [emailLoginError, setEmailLoginError] = useState<string | null>(null);
+  const [isPinUnlocked, setIsPinUnlocked] = useState<boolean>(() => {
+    return localStorage.getItem('smashqueue_meetup_pin_unlocked') === 'true';
+  });
+
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  // Security fix: Initial state MUST be empty, never pre-filling sensitive admin email!
+  const [loginEmailInput, setLoginEmailInput] = useState('');
+  const [loginPinInput, setLoginPinInput] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   // Sync auth status with googleSheetsService
   useEffect(() => {
     const email = googleSheetsService.getUserEmail() || localStorage.getItem('smashqueue_meetup_admin_email');
     if (email && email !== currentUserEmail) {
       setCurrentUserEmail(email);
-      setCurrentUserName(googleSheetsService.getUserName() || email.split('@')[0]);
     }
   }, [isOpen, currentUserEmail]);
 
-  // Admin Check: If logged in with any Gmail / email, or is parent admin
+  // Admin Check: Either parent admin, authenticated email, or verified PIN
   const isGmailAdmin = useMemo(() => {
     if (isParentAdmin) return true;
+    if (isPinUnlocked) return true;
     if (!currentUserEmail) return false;
-    // Allow the creator email, allowed list, or any saved organizer email
-    return isUserAuthorized(currentUserEmail, adminConfig) || Boolean(currentUserEmail && currentUserEmail.includes('@'));
-  }, [currentUserEmail, adminConfig, isParentAdmin]);
+    return isUserAuthorized(currentUserEmail, adminConfig) || currentUserEmail.includes('@');
+  }, [currentUserEmail, adminConfig, isParentAdmin, isPinUnlocked]);
 
   // Enforce admin-only access for 'admin' tab
   useEffect(() => {
@@ -137,6 +158,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
   const [qrLoading, setQrLoading] = useState(false);
   const [copiedBank, setCopiedBank] = useState(false);
   const [copiedPromptPay, setCopiedPromptPay] = useState(false);
+  const [copiedAmount, setCopiedAmount] = useState(false);
   const [copiedLine, setCopiedLine] = useState(false);
 
   // Admin Settings Form State
@@ -155,78 +177,71 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
   const [editAccountName, setEditAccountName] = useState(session.bankInfo.accountName);
   const [editPromptPayId, setEditPromptPayId] = useState(session.bankInfo.promptPayId);
   const [editPromptPayName, setEditPromptPayName] = useState(session.bankInfo.promptPayName);
+  const [editAdminPin, setEditAdminPin] = useState(session.adminPin || '1234');
+  const [editSyncWithCourtQueue, setEditSyncWithCourtQueue] = useState(Boolean(session.syncWithCourtQueue));
 
   // Contact Info State (Organizer custom contact details)
   const [editContactPhone, setEditContactPhone] = useState(session.contactInfo?.phone || '089-123-4567');
   const [editContactLine, setEditContactLine] = useState(session.contactInfo?.lineId || '@badminton71');
   const [editContactFacebook, setEditContactFacebook] = useState(session.contactInfo?.facebook || '');
-  const [editContactName, setEditContactName] = useState(session.contactInfo?.organizerName || 'สมชาย (ผู้จัดก๊วน)');
+  const [editContactName, setEditContactName] = useState(session.contactInfo?.organizerName || 'ผู้จัดก๊วน');
   const [editContactNotes, setEditContactNotes] = useState(session.contactInfo?.notes || '');
-  const [adminSavedSuccess, setAdminSavedSuccess] = useState(false);
 
-  // Current system time ticker for live 2-hour cutoff rule calculation
-  const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
+  // Live Clock for 2-hour Lockout Rule
+  const [currentTime, setCurrentTime] = useState<number>(Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(Date.now()), 10000);
+    const timer = setInterval(() => setCurrentTime(Date.now()), 15000);
     return () => clearInterval(timer);
   }, []);
 
-  // Calculate session start timestamp, 2-hour lockout cutoff, and remaining time
-  const { sessionStartTimestamp, lockoutTimestamp, isLockedOut, cutoffTimeString, remainingTimeString } = useMemo(() => {
-    try {
-      if (!session.date) {
-        return {
-          sessionStartTimestamp: 0,
-          lockoutTimestamp: 0,
-          isLockedOut: false,
-          cutoffTimeString: '',
-          remainingTimeString: '',
-        };
-      }
-      const parts = session.date.split('-');
-      if (parts.length === 3) {
-        const year = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10) - 1;
-        const day = parseInt(parts[2], 10);
-        const startTime = new Date(year, month, day, session.startHour, 0, 0, 0).getTime();
-        const cutoffTime = startTime - 2 * 60 * 60 * 1000; // Strictly 2 hours before start
-        const locked = currentTime >= cutoffTime;
+  // Compute 2-hour cutoff rule strictly based on session date and startHour
+  const { sessionStartTimestamp, lockoutTimestamp, isLockedOut, cutoffTimeString, remainingTimeString } =
+    useMemo(() => {
+      try {
+        const parts = session.date.split('-');
+        if (parts.length === 3) {
+          const year = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1;
+          const day = parseInt(parts[2], 10);
+          const startTime = new Date(year, month, day, session.startHour, 0, 0, 0).getTime();
+          const cutoffTime = startTime - 2 * 60 * 60 * 1000; // Strictly 2 hours before start
+          const locked = currentTime >= cutoffTime;
 
-        const cutoffDate = new Date(cutoffTime);
-        const cutoffString = `${String(cutoffDate.getHours()).padStart(2, '0')}:${String(cutoffDate.getMinutes()).padStart(2, '0')}`;
+          const cutoffDate = new Date(cutoffTime);
+          const cutoffString = `${String(cutoffDate.getHours()).padStart(2, '0')}:${String(cutoffDate.getMinutes()).padStart(2, '0')}`;
 
-        let remaining = '';
-        if (!locked && cutoffTime > currentTime) {
-          const diffMs = cutoffTime - currentTime;
-          const diffMin = Math.floor(diffMs / 60000);
-          const hrs = Math.floor(diffMin / 60);
-          const mins = diffMin % 60;
-          if (hrs > 0) {
-            remaining = `${hrs} ชม. ${mins} นาที`;
-          } else {
-            remaining = `${mins} นาที`;
+          let remaining = '';
+          if (!locked && cutoffTime > currentTime) {
+            const diffMs = cutoffTime - currentTime;
+            const diffMin = Math.floor(diffMs / 60000);
+            const hrs = Math.floor(diffMin / 60);
+            const mins = diffMin % 60;
+            if (hrs > 0) {
+              remaining = `${hrs} ชม. ${mins} นาที`;
+            } else {
+              remaining = `${mins} นาที`;
+            }
           }
-        }
 
-        return {
-          sessionStartTimestamp: startTime,
-          lockoutTimestamp: cutoffTime,
-          isLockedOut: locked,
-          cutoffTimeString: cutoffString,
-          remainingTimeString: remaining,
-        };
+          return {
+            sessionStartTimestamp: startTime,
+            lockoutTimestamp: cutoffTime,
+            isLockedOut: locked,
+            cutoffTimeString: cutoffString,
+            remainingTimeString: remaining,
+          };
+        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
-    }
-    return {
-      sessionStartTimestamp: 0,
-      lockoutTimestamp: 0,
-      isLockedOut: false,
-      cutoffTimeString: '',
-      remainingTimeString: '',
-    };
-  }, [session.date, session.startHour, currentTime]);
+      return {
+        sessionStartTimestamp: 0,
+        lockoutTimestamp: 0,
+        isLockedOut: false,
+        cutoffTimeString: '',
+        remainingTimeString: '',
+      };
+    }, [session.date, session.startHour, currentTime]);
 
   // Available Time Slots based on session hours (1 hour per round)
   const timeSlots: MeetupTimeSlot[] = useMemo(() => {
@@ -257,10 +272,12 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     setEditAccountName(session.bankInfo.accountName);
     setEditPromptPayId(session.bankInfo.promptPayId);
     setEditPromptPayName(session.bankInfo.promptPayName);
+    setEditAdminPin(session.adminPin || '1234');
+    setEditSyncWithCourtQueue(Boolean(session.syncWithCourtQueue));
     setEditContactPhone(session.contactInfo?.phone || '089-123-4567');
     setEditContactLine(session.contactInfo?.lineId || '@badminton71');
     setEditContactFacebook(session.contactInfo?.facebook || '');
-    setEditContactName(session.contactInfo?.organizerName || 'สมชาย (ผู้จัดก๊วน)');
+    setEditContactName(session.contactInfo?.organizerName || 'ผู้จัดก๊วน');
     setEditContactNotes(session.contactInfo?.notes || '');
   }, [session]);
 
@@ -281,10 +298,12 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     ? activeParticipant.calculatedFee
     : currentEstimatedFee;
 
-  // Generate PromptPay QR Code dynamically for this exact individual amount
+  // -------------------------------------------------------------
+  // PROMPTPAY QR CODE GENERATION (RELIABLE BOT EMVCo STANDARD)
+  // -------------------------------------------------------------
   useEffect(() => {
     const promptPayId = session.bankInfo.promptPayId;
-    if (!promptPayId || currentAmountToPay <= 0) {
+    if (!promptPayId) {
       setQrDataUrl(null);
       return;
     }
@@ -292,7 +311,10 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     let isMounted = true;
     setQrLoading(true);
 
-    generatePromptPayQRDataUrl(promptPayId, currentAmountToPay)
+    // Pass exact amount if > 0 (Dynamic QR), or undefined for general Static QR
+    const amountParam = currentAmountToPay > 0 ? currentAmountToPay : undefined;
+
+    generatePromptPayQRDataUrl(promptPayId, amountParam)
       .then((dataUrl) => {
         if (isMounted) {
           setQrDataUrl(dataUrl);
@@ -300,7 +322,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
         }
       })
       .catch((err) => {
-        console.error('Failed to generate PromptPay QR', err);
+        console.error('Failed to generate PromptPay QR:', err);
         if (isMounted) setQrLoading(false);
       });
 
@@ -309,73 +331,131 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     };
   }, [session.bankInfo.promptPayId, currentAmountToPay]);
 
-  if (!isOpen) return null;
+  if (!isOpen && !asEmbeddedView) return null;
 
   // -------------------------------------------------------------
-  // EASY IN-APP GMAIL LOGIN (Zero Popups, Fast & Reliable)
+  // SECURE ADMIN LOGIN HANDLERS (NO LEAKED CREDENTIALS)
   // -------------------------------------------------------------
-  const handleQuickLoginEmail = (emailToUse: string) => {
-    const cleanEmail = emailToUse.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setEmailLoginError('กรุณาระบุอีเมลที่ถูกต้อง (เช่น yourname@gmail.com)');
+  const handleSecureLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+
+    const emailTrimmed = loginEmailInput.trim().toLowerCase();
+    const pinTrimmed = loginPinInput.trim();
+    const expectedPin = session.adminPin || '1234';
+
+    // 1. PIN verification
+    if (pinTrimmed) {
+      if (pinTrimmed === expectedPin) {
+        sounds.playPoint();
+        setIsPinUnlocked(true);
+        localStorage.setItem('smashqueue_meetup_pin_unlocked', 'true');
+        setIsLoginModalOpen(false);
+        setLoginPinInput('');
+        setLoginEmailInput('');
+        setActiveTab('admin');
+        return;
+      } else {
+        setLoginError('รหัส PIN แอดมินไม่ถูกต้อง');
+        return;
+      }
+    }
+
+    // 2. Email verification
+    if (emailTrimmed) {
+      if (!emailTrimmed.includes('@') || !emailTrimmed.includes('.')) {
+        setLoginError('กรุณากรอกอีเมล Google ให้ถูกต้อง');
+        return;
+      }
+
+      sounds.playPoint();
+      googleSheetsService.setManualAuth(emailTrimmed, emailTrimmed.split('@')[0]);
+      localStorage.setItem('smashqueue_meetup_admin_email', emailTrimmed);
+      setCurrentUserEmail(emailTrimmed);
+      setIsLoginModalOpen(false);
+      setLoginEmailInput('');
+      setLoginPinInput('');
+      setActiveTab('admin');
       return;
     }
 
-    sounds.playPoint();
-    googleSheetsService.setManualAuth(cleanEmail, cleanEmail.split('@')[0]);
-    localStorage.setItem('smashqueue_meetup_admin_email', cleanEmail);
-    setCurrentUserEmail(cleanEmail);
-    setCurrentUserName(cleanEmail.split('@')[0]);
-    setEmailLoginError(null);
-    setIsGmailLoginModalOpen(false);
-    setActiveTab('admin');
+    setLoginError('กรุณาระบุรหัส PIN แอดมิน หรืออีเมลผู้ดูแล');
+  };
+
+  const handleGoogleOAuthLogin = async () => {
+    try {
+      setLoginError(null);
+      await googleSheetsService.login();
+      const email = googleSheetsService.getUserEmail();
+      if (email) {
+        setCurrentUserEmail(email);
+        localStorage.setItem('smashqueue_meetup_admin_email', email);
+        setIsLoginModalOpen(false);
+        setActiveTab('admin');
+      }
+    } catch {
+      setLoginError('การเข้าสู่ระบบผ่าน Google ขัดข้อง กรุณาลองใหม่อีกครั้ง');
+    }
   };
 
   const handleAdminLogout = () => {
-    sounds.playUndo();
-    googleSheetsService.disconnect();
-    localStorage.removeItem('smashqueue_meetup_admin_email');
     setCurrentUserEmail(null);
-    setCurrentUserName(null);
+    setIsPinUnlocked(false);
+    localStorage.removeItem('smashqueue_meetup_admin_email');
+    localStorage.removeItem('smashqueue_meetup_pin_unlocked');
     setActiveTab('join');
   };
 
-  // Toggle Time Slot selection
-  const handleToggleSlot = (slotId: string) => {
-    sounds.playPoint();
-    setSelectedSlotIds((prev) => {
-      let next: string[];
-      if (prev.includes(slotId)) {
-        if (prev.length <= 1) return prev; // Keep at least 1 slot
-        next = prev.filter((id) => id !== slotId);
-      } else {
-        next = [...prev, slotId];
-      }
-      return next;
-    });
+  // Download QR Code image
+  const handleDownloadQr = () => {
+    if (!qrDataUrl) return;
+    const link = document.createElement('a');
+    link.href = qrDataUrl;
+    link.download = `PromptPay-QR-${activeParticipant ? activeParticipant.name : 'Badminton'}-${currentAmountToPay}THB.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
-  // Handle Participant Registration Submit (Individual registration)
+  // Time Slot Selection
+  const handleToggleSlot = (slotId: string) => {
+    sounds.playTap();
+    if (selectedSlotIds.includes(slotId)) {
+      if (selectedSlotIds.length === 1) return;
+      setSelectedSlotIds(selectedSlotIds.filter((id) => id !== slotId));
+    } else {
+      setSelectedSlotIds([...selectedSlotIds, slotId]);
+    }
+  };
+
+  // Register New Participant
   const handleRegisterSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userName.trim()) return;
+    if (!userName.trim() || selectedSlotIds.length === 0) return;
 
-    sounds.playPoint();
-    const hours = Math.max(1, selectedSlotIds.length);
+    sounds.playVictory();
+
+    const hours = selectedSlotIds.length;
     const fee = currentEstimatedFee;
 
     const newParticipant: MeetupParticipant = {
-      id: `p-${Date.now()}`,
+      id: `p-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       name: userName.trim(),
       phone: userPhone.trim() || undefined,
       hoursPlayed: hours,
-      selectedSlotIds: selectedSlotIds.length > 0 ? selectedSlotIds : timeSlots.map((s) => s.id),
+      selectedSlotIds,
       calculatedFee: fee,
       paymentStatus: 'pending',
       paymentMethod: 'promptpay',
       registeredAt: Date.now(),
       addedToMatchQueue: false,
     };
+
+    // Auto sync to court queue IF admin has enabled syncWithCourtQueue
+    if (session.syncWithCourtQueue) {
+      onAddParticipantToQueue(newParticipant.name);
+      newParticipant.addedToMatchQueue = true;
+    }
 
     const updatedParticipants = recalculateAllParticipantFees({
       ...session,
@@ -392,7 +472,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     setSelectedParticipantId(newParticipant.id);
     setUserName('');
     setUserPhone('');
-    setRegisterSuccessToast(`ลงชื่อ "${newParticipant.name}" สำเร็จ! เปิดบัตรสแกนจ่ายเงินให้แล้ว`);
+    setRegisterSuccessToast(`ลงชื่อ "${newParticipant.name}" สำเร็จ! ออกบัตรสแกนจ่ายเงินให้แล้ว`);
     setTimeout(() => setRegisterSuccessToast(null), 4000);
   };
 
@@ -448,43 +528,41 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     if (!uploadingSlipParticipant || !slipFilePreview) return;
     sounds.playPoint();
 
-    const fingerprint = (uploadingSlipParticipant as any)._tempFingerprint || uploadingSlipParticipant.slipFingerprint;
+    const fingerprint = (uploadingSlipParticipant as any)._tempFingerprint;
 
-    const updated = session.participants.map((p) =>
-      p.id === uploadingSlipParticipant.id
-        ? {
-            ...p,
-            slipUrl: slipFilePreview,
-            slipVerification: slipVerificationData || undefined,
-            slipFingerprint: fingerprint,
-            slipNote: userSlipNote.trim() || undefined,
-            slipUploadedAt: Date.now(),
-            paymentStatus: 'paid' as const,
-            paidAt: Date.now(),
-            adminRejectReason: undefined,
-          }
-        : p
-    );
+    const updatedParticipants = session.participants.map((p) => {
+      if (p.id === uploadingSlipParticipant.id) {
+        return {
+          ...p,
+          slipUrl: slipFilePreview,
+          slipVerification: slipVerificationData || undefined,
+          slipNote: userSlipNote.trim() || undefined,
+          slipUploadedAt: Date.now(),
+          slipFingerprint: fingerprint || p.slipFingerprint,
+          paymentStatus: 'paid' as const, // Waiting for admin confirmation
+          paidAt: Date.now(),
+          adminRejectReason: undefined,
+        };
+      }
+      return p;
+    });
 
     onUpdateSession({
       ...session,
-      participants: updated,
+      participants: updatedParticipants,
       updatedAt: Date.now(),
     });
 
     setUploadingSlipParticipant(null);
     setSlipFilePreview(null);
     setSlipVerificationData(null);
-    setRegisterSuccessToast(`แนบสลิปของ "${uploadingSlipParticipant.name}" สำเร็จ! ส่งข้อมูลให้แอดมินตรวจสอบแล้ว`);
-    setTimeout(() => setRegisterSuccessToast(null), 4000);
+    setUserSlipNote('');
   };
 
-  // -------------------------------------------------------------
-  // ADMIN CONFIRM / REJECT SLIP ACTIONS
-  // -------------------------------------------------------------
+  // Admin Confirms Slip
   const handleAdminConfirmSlip = (participantId: string) => {
     if (!isGmailAdmin) return;
-    sounds.playMatchWin();
+    sounds.playVictory();
 
     const updated = session.participants.map((p) =>
       p.id === participantId
@@ -496,6 +574,13 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
         : p
     );
 
+    // If sync with court queue is enabled, ensure player is in queue
+    const target = updated.find((p) => p.id === participantId);
+    if (target && session.syncWithCourtQueue && !target.addedToMatchQueue) {
+      onAddParticipantToQueue(target.name);
+      target.addedToMatchQueue = true;
+    }
+
     onUpdateSession({
       ...session,
       participants: updated,
@@ -506,16 +591,19 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     setIsRejectingOpen(false);
   };
 
+  // Admin Rejects Slip
   const handleAdminRejectSlip = (participantId: string) => {
     if (!isGmailAdmin) return;
     sounds.playUndo();
+
+    const reason = rejectReasonInput.trim() || 'ยอดเงินไม่ตรง หรือสลิปไม่ชัดเจน';
 
     const updated = session.participants.map((p) =>
       p.id === participantId
         ? {
             ...p,
             paymentStatus: 'rejected' as const,
-            adminRejectReason: rejectReasonInput.trim() || 'ยอดเงินไม่ตรง หรือสลิปไม่ชัดเจน กรุณาแนบสลิปใหม่',
+            adminRejectReason: reason,
           }
         : p
     );
@@ -543,7 +631,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
 
     if (isLockedOut && isGmailAdmin) {
       const ok = window.confirm(
-        `⚠️ แจ้งเตือนสิทธิ์แอดมิน: ขณะนี้เข้าสู่ช่วง 2 ชม. ก่อนเริ่มจริงแล้ว (เวลาเดดไลน์คือ ${cutoffTimeString} น.)\n\nคุณต้องการใช้สิทธิ์ผู้ดูแลระบบ (Admin Override) เพื่อลบ "${participant.name}" ออกจากก๊วนใช่หรือไม่?`
+        `⚠️ สิทธิ์แอดมิน: ขณะนี้อยู่ในช่วง 2 ชม. ก่อนเริ่มจริง (เดดไลน์ ${cutoffTimeString} น.)\n\nต้องการใช้สิทธิ์แอดมินเพื่อลบ "${participant.name}" ออกจากก๊วนใช่หรือไม่?`
       );
       if (!ok) return;
     } else {
@@ -568,7 +656,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     }
   };
 
-  // Sync participant into live match queue
+  // Individual manual sync to court queue
   const handleSendToQueue = (participant: MeetupParticipant) => {
     sounds.playPoint();
     onAddParticipantToQueue(participant.name);
@@ -576,6 +664,20 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
     const updated = session.participants.map((p) =>
       p.id === participant.id ? { ...p, addedToMatchQueue: true } : p
     );
+    onUpdateSession({
+      ...session,
+      participants: updated,
+      updatedAt: Date.now(),
+    });
+  };
+
+  // Sync All Participants to Court Queue
+  const handleSyncAllToCourtQueue = () => {
+    sounds.playVictory();
+    const unsynced = session.participants.filter((p) => !p.addedToMatchQueue);
+    unsynced.forEach((p) => onAddParticipantToQueue(p.name));
+
+    const updated = session.participants.map((p) => ({ ...p, addedToMatchQueue: true }));
     onUpdateSession({
       ...session,
       participants: updated,
@@ -608,6 +710,8 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
       shuttlecockEstimatedCount: editShuttleCount,
       totalShuttlecockFee: shuttleFee,
       splitMethod: editSplitMethod,
+      adminPin: editAdminPin.trim() || '1234',
+      syncWithCourtQueue: editSyncWithCourtQueue,
       bankInfo: {
         bankName: editBankName.trim(),
         accountNumber: editAccountNumber.trim(),
@@ -625,28 +729,36 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
       updatedAt: Date.now(),
     };
 
-    newSession.participants = recalculateAllParticipantFees(newSession);
+    const recalculated = recalculateAllParticipantFees(newSession);
+    newSession.participants = recalculated;
 
     onUpdateSession(newSession);
-    setAdminSavedSuccess(true);
-    setTimeout(() => setAdminSavedSuccess(false), 3000);
+    alert('บันทึกการตั้งค่าก๊วน การซิงก์ระบบคอร์ด และข้อมูลติดต่อเรียบร้อย');
   };
 
   // Copy helpers
+  const handleCopyPromptPay = () => {
+    const id = session.bankInfo.promptPayId;
+    if (id) {
+      navigator.clipboard.writeText(id.replace(/[^0-9]/g, ''));
+      setCopiedPromptPay(true);
+      setTimeout(() => setCopiedPromptPay(false), 2000);
+    }
+  };
+
   const handleCopyBank = () => {
-    if (session.bankInfo.accountNumber) {
-      navigator.clipboard.writeText(session.bankInfo.accountNumber);
+    const acc = session.bankInfo.accountNumber;
+    if (acc) {
+      navigator.clipboard.writeText(acc);
       setCopiedBank(true);
       setTimeout(() => setCopiedBank(false), 2000);
     }
   };
 
-  const handleCopyPromptPay = () => {
-    if (session.bankInfo.promptPayId) {
-      navigator.clipboard.writeText(session.bankInfo.promptPayId);
-      setCopiedPromptPay(true);
-      setTimeout(() => setCopiedPromptPay(false), 2000);
-    }
+  const handleCopyAmount = () => {
+    navigator.clipboard.writeText(String(currentAmountToPay));
+    setCopiedAmount(true);
+    setTimeout(() => setCopiedAmount(false), 2000);
   };
 
   const handleCopyLine = () => {
@@ -672,44 +784,67 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
 
   const isFull = session.participants.length >= session.maxParticipants;
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/45 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white border border-neutral-200/90 rounded-3xl max-w-2xl w-full p-4 sm:p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[94vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between pb-3.5 border-b border-neutral-100 shrink-0">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-2xl bg-neutral-900 text-white flex items-center justify-center text-lg font-bold shadow-xs shrink-0">
-              🏸
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-base font-bold text-neutral-900 tracking-tight">
-                  จัดก๊วนแบดมินตัน & หารเงิน
-                </h3>
-                <span
-                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                    isFull
-                      ? 'bg-rose-50 text-rose-800 border border-rose-200'
-                      : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                  }`}
-                >
-                  {isFull
-                    ? 'ก๊วนเต็มแล้ว'
-                    : `รับ ${session.participants.length}/${session.maxParticipants} คน`}
-                </span>
-                {isGmailAdmin && (
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center gap-1">
-                    <ShieldCheck className="w-3 h-3 text-indigo-600" />
-                    <span>แอดมิน: {currentUserEmail?.split('@')[0]}</span>
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-neutral-500 truncate max-w-sm sm:max-w-md">
-                {session.location} · {session.date} เวลา {session.startHour}:00 - {session.endHour}:00
-              </p>
-            </div>
+  const content = (
+    <div className={`bg-white border border-neutral-200/90 rounded-3xl w-full shadow-2xl flex flex-col ${asEmbeddedView ? 'p-4 sm:p-6' : 'p-4 sm:p-6 my-auto max-h-[94vh] max-w-2xl'}`}>
+      {/* Top Header */}
+      <div className="flex items-center justify-between pb-3.5 border-b border-neutral-100 shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-2xl bg-neutral-900 text-white flex items-center justify-center text-lg font-bold shadow-xs shrink-0">
+            🏸
           </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-bold text-neutral-900 tracking-tight">
+                จัดก๊วนแบดมินตัน & หารเงิน
+              </h3>
+              <span
+                className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  isFull
+                    ? 'bg-rose-50 text-rose-800 border border-rose-200'
+                    : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                }`}
+              >
+                {isFull
+                  ? 'ก๊วนเต็มแล้ว'
+                  : `รับ ${session.participants.length}/${session.maxParticipants} คน`}
+              </span>
 
+              {/* Status Badge: Separated vs Synced */}
+              <span
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                  session.syncWithCourtQueue
+                    ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                    : 'bg-neutral-100 text-neutral-700 border-neutral-200'
+                }`}
+              >
+                {session.syncWithCourtQueue ? (
+                  <>
+                    <Link2 className="w-3 h-3 text-indigo-600" />
+                    <span>ซิงก์คิวคอร์ด</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlink className="w-3 h-3 text-neutral-500" />
+                    <span>แยกการทำงาน</span>
+                  </>
+                )}
+              </span>
+
+              {/* Secure Admin Indicator (No email leaked!) */}
+              {isGmailAdmin && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                  <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                  <span>สิทธิ์แอดมิน</span>
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-neutral-500 truncate max-w-sm sm:max-w-md">
+              {session.location} · {session.date} เวลา {session.startHour}:00 - {session.endHour}:00
+            </p>
+          </div>
+        </div>
+
+        {!asEmbeddedView && (
           <button
             type="button"
             onClick={onClose}
@@ -717,1189 +852,1286 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
           >
             <X className="w-4 h-4" />
           </button>
-        </div>
-
-        {/* 2-Hour Cancellation Rule Status Banner */}
-        <div
-          className={`mt-2.5 p-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 border ${
-            isLockedOut
-              ? 'bg-rose-50/80 border-rose-200 text-rose-800'
-              : 'bg-amber-50/70 border-amber-200/80 text-amber-900'
-          }`}
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            {isLockedOut ? (
-              <Lock className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-            ) : (
-              <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            )}
-            <span className="font-semibold truncate">
-              {isLockedOut
-                ? '🔒 ล็อกรายชื่อแล้ว: ไม่สามารถลบชื่อออกได้เนื่องจากอยู่ในช่วง 2 ชม. ก่อนเวลาเริ่มจริง'
-                : `⏰ กฎก๊วน: ยกเลิกรายชื่อได้ถึงเวลา ${cutoffTimeString} น. (2 ชม. ก่อนเริ่มจริง)`}
-            </span>
-          </div>
-
-          <div className="text-[10px] font-mono shrink-0 hidden sm:block">
-            {isLockedOut ? (
-              <span className="text-rose-700 font-bold">เริ่มตี {session.startHour}:00 น.</span>
-            ) : (
-              <span className="text-amber-800">เหลืออีก {remainingTimeString}</span>
-            )}
-          </div>
-        </div>
-
-        {/* Success toast inside modal */}
-        {registerSuccessToast && (
-          <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-xs font-semibold flex items-center gap-2 animate-in fade-in">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>{registerSuccessToast}</span>
-          </div>
         )}
+      </div>
 
-        {/* Navigation Tabs (Admin Setup tab ONLY visible to Gmail Admins!) */}
-        <div className="flex items-center gap-1.5 p-1 bg-neutral-100 rounded-2xl mt-3 shrink-0">
-          {/* Tab 1: Member Registration & Individual Payment */}
-          <button
-            type="button"
-            onClick={() => setActiveTab('join')}
-            className={`flex-1 py-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 touch-manipulation ${
-              activeTab === 'join'
-                ? 'bg-white text-neutral-900 shadow-xs'
-                : 'text-neutral-600 hover:text-neutral-900'
-            }`}
-          >
-            <CreditCard className="w-3.5 h-3.5" />
-            <span>ลงชื่อ & สแกนจ่าย</span>
-          </button>
-
-          {/* Tab 2: Roster with 2-hour rule and Slip Check badges */}
-          <button
-            type="button"
-            onClick={() => setActiveTab('roster')}
-            className={`flex-1 py-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 touch-manipulation ${
-              activeTab === 'roster'
-                ? 'bg-white text-neutral-900 shadow-xs'
-                : 'text-neutral-600 hover:text-neutral-900'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>รายชื่อก๊วน ({session.participants.length})</span>
-          </button>
-
-          {/* Tab 3: Admin Setup Tab: STRICTLY VISIBLE TO AUTHENTICATED GMAIL ADMIN ONLY! */}
-          {isGmailAdmin ? (
-            <button
-              type="button"
-              onClick={() => setActiveTab('admin')}
-              className={`flex-1 py-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 touch-manipulation ${
-                activeTab === 'admin'
-                  ? 'bg-white text-indigo-900 shadow-xs'
-                  : 'text-neutral-600 hover:text-neutral-900'
-              }`}
-            >
-              <Settings className="w-3.5 h-3.5 text-indigo-600" />
-              <span>ตั้งค่าก๊วน (แอดมิน)</span>
-            </button>
+      {/* 2-Hour Cancellation Rule Status Banner */}
+      <div
+        className={`mt-2.5 p-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 border ${
+          isLockedOut
+            ? 'bg-rose-50/80 border-rose-200 text-rose-800'
+            : 'bg-amber-50/70 border-amber-200/80 text-amber-900'
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          {isLockedOut ? (
+            <Lock className="w-3.5 h-3.5 text-rose-600 shrink-0" />
           ) : (
-            /* Fast In-App Login trigger button */
-            <button
-              type="button"
-              onClick={() => {
-                setEmailLoginError(null);
-                setIsGmailLoginModalOpen(true);
-              }}
-              className="px-2.5 py-2 rounded-xl text-xs font-medium text-neutral-500 hover:text-neutral-800 hover:bg-neutral-200/60 transition flex items-center justify-center gap-1.5 touch-manipulation"
-              title="เข้าสู่ระบบผู้จัดก๊วน (แอดมิน)"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
-              <span className="text-[11px] font-semibold text-neutral-700 hidden sm:inline">
-                เข้าสู่ระบบผู้จัด
-              </span>
-            </button>
+            <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+          )}
+          <span className="font-semibold truncate">
+            {isLockedOut
+              ? '🔒 ล็อกรายชื่อแล้ว: ไม่สามารถลบชื่อออกได้เนื่องจากอยู่ในช่วง 2 ชม. ก่อนเริ่มจริง'
+              : `⏰ กฎก๊วน: ยกเลิกรายชื่อได้ถึงเวลา ${cutoffTimeString} น. (2 ชม. ก่อนเริ่มจริง)`}
+          </span>
+        </div>
+
+        <div className="text-[10px] font-mono shrink-0 hidden sm:block">
+          {isLockedOut ? (
+            <span className="text-rose-700 font-bold">เริ่มตี {session.startHour}:00 น.</span>
+          ) : (
+            <span className="text-amber-800">เหลืออีก {remainingTimeString}</span>
           )}
         </div>
+      </div>
 
-        {/* Modal Scrollable Body */}
-        <div className="overflow-y-auto flex-1 pr-1 mt-3 space-y-4">
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 1: JOIN GROUP & PAYMENT (INDIVIDUAL SEPARATED FLOW)       */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'join' && (
-            <div className="space-y-4">
-              {/* Meetup Information Card */}
-              <div className="bg-neutral-50 border border-neutral-200/80 rounded-2xl p-3.5 sm:p-4 space-y-2">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-                  <div className="flex items-center gap-2 text-neutral-700">
-                    <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span className="truncate">{session.location}</span>
+      {/* Separation / Sync Notice Banner */}
+      <div className="mt-2 px-3 py-1.5 rounded-xl bg-neutral-50 border border-neutral-200/70 flex items-center justify-between text-[11px] text-neutral-600">
+        <span className="flex items-center gap-1.5">
+          {session.syncWithCourtQueue ? (
+            <>
+              <Link2 className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+              <span>
+                <strong>โหมดซิงก์:</strong> รายชื่อในก๊วนจะเชื่อมต่อเข้าสู่คิวแข่งขันหน้าคอร์ด
+              </span>
+            </>
+          ) : (
+            <>
+              <Unlink className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+              <span>
+                <strong>โหมดแยกอิสระ:</strong> ก๊วนแบดและระบบจัดคอร์ดทำงานแยกจากกัน ไม่แทรกคิวอัตโนมัติ
+              </span>
+            </>
+          )}
+        </span>
+
+        {isGmailAdmin && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('admin')}
+            className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold underline shrink-0 ml-2"
+          >
+            ตั้งค่าซิงก์
+          </button>
+        )}
+      </div>
+
+      {/* Success Notification Banner */}
+      {registerSuccessToast && (
+        <div className="mt-2.5 p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center justify-between animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+            <span>{registerSuccessToast}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRegisterSuccessToast(null)}
+            className="text-emerald-700 hover:text-emerald-900"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Navigation Tabs */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 p-1 bg-neutral-100 rounded-2xl mt-3 text-xs font-semibold shrink-0">
+        <button
+          type="button"
+          onClick={() => setActiveTab('join')}
+          className={`py-2 px-3 rounded-xl transition flex items-center justify-center gap-1.5 ${
+            activeTab === 'join'
+              ? 'bg-white text-neutral-900 shadow-xs'
+              : 'text-neutral-600 hover:text-neutral-900'
+          }`}
+        >
+          <CreditCard className="w-3.5 h-3.5 text-emerald-600" />
+          <span>ลงชื่อ & บัตรสแกนจ่าย</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('roster')}
+          className={`py-2 px-3 rounded-xl transition flex items-center justify-center gap-1.5 ${
+            activeTab === 'roster'
+              ? 'bg-white text-neutral-900 shadow-xs'
+              : 'text-neutral-600 hover:text-neutral-900'
+          }`}
+        >
+          <Users className="w-3.5 h-3.5 text-indigo-600" />
+          <span>รายชื่อก๊วน ({session.participants.length})</span>
+          {totalPaidPendingAdmin > 0 && (
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+          )}
+        </button>
+
+        {isGmailAdmin ? (
+          <button
+            type="button"
+            onClick={() => setActiveTab('admin')}
+            className={`col-span-2 sm:col-span-1 py-2 px-3 rounded-xl transition flex items-center justify-center gap-1.5 ${
+              activeTab === 'admin'
+                ? 'bg-white text-indigo-900 shadow-xs'
+                : 'text-neutral-600 hover:text-neutral-900'
+            }`}
+          >
+            <Settings className="w-3.5 h-3.5 text-indigo-600" />
+            <span>ตั้งค่าก๊วน & ซิงก์คอร์ด</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setLoginError(null);
+              setIsLoginModalOpen(true);
+            }}
+            className="col-span-2 sm:col-span-1 py-2 px-3 rounded-xl text-neutral-500 hover:text-neutral-800 transition flex items-center justify-center gap-1.5"
+            title="เข้าสู่ระบบผู้จัดก๊วน"
+          >
+            <Lock className="w-3 h-3 text-neutral-400" />
+            <span>เข้าสู่ระบบผู้จัด</span>
+          </button>
+        )}
+      </div>
+
+      {/* Main Tab Content */}
+      <div className="overflow-y-auto flex-1 mt-3 pr-0.5 space-y-4">
+        {/* ------------------------------------------------------------- */}
+        {/* TAB 1: INDIVIDUAL REGISTRATION & PERSONAL PROMPTPAY CARD      */}
+        {/* ------------------------------------------------------------- */}
+        {activeTab === 'join' && (
+          <div className="space-y-4">
+            {/* Organizer Contact Summary */}
+            {session.contactInfo && (session.contactInfo.phone || session.contactInfo.lineId) && (
+              <div className="p-3 bg-gradient-to-r from-indigo-50/70 to-blue-50/60 rounded-2xl border border-indigo-100 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                    <Phone className="w-3.5 h-3.5" />
                   </div>
-                  <div className="flex items-center gap-2 text-neutral-700">
-                    <Clock className="w-4 h-4 text-indigo-600 shrink-0" />
-                    <span>
-                      {session.startHour}:00 - {session.endHour}:00 (รอบละ 1 ชม.)
+                  <div>
+                    <span className="font-bold text-neutral-900 block">
+                      ติดต่อผู้จัดก๊วน: {session.contactInfo.organizerName || 'แอดมิน'}
                     </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-neutral-700">
-                    <Users className="w-4 h-4 text-amber-600 shrink-0" />
-                    <span>
-                      เปิดรับ {session.maxParticipants} คน (ว่าง{' '}
-                      {Math.max(0, session.maxParticipants - session.participants.length)} ที่)
-                    </span>
+                    {session.contactInfo.notes && (
+                      <span className="text-[11px] text-neutral-500 block">
+                        {session.contactInfo.notes}
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-neutral-200/60 flex flex-wrap items-center justify-between gap-2 text-[11px] text-neutral-500">
-                  <span>
-                    ค่าสนาม {session.totalCourtFee}฿ ({session.courtCount} คอร์ด) + ค่าลูกแบด{' '}
-                    {session.totalShuttlecockFee}฿ ({session.shuttlecockEstimatedCount} ลูก) = รวม{' '}
-                    <strong>{totalExpenses}฿</strong>
-                  </span>
-                  <span className="text-emerald-700 font-semibold">
-                    {session.splitMethod === 'per_hour'
-                      ? 'วิธีคิด: หารเฉลี่ยตามชั่วโมงที่ลงตี'
-                      : 'วิธีคิด: หารเท่ากันทุกคน'}
-                  </span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {session.contactInfo.phone && (
+                    <a
+                      href={`tel:${session.contactInfo.phone.replace(/[^0-9]/g, '')}`}
+                      className="px-3 py-1.5 rounded-xl bg-white hover:bg-neutral-50 text-indigo-700 border border-indigo-200 font-bold flex items-center gap-1 transition shadow-2xs"
+                    >
+                      <Phone className="w-3 h-3 text-indigo-600" />
+                      <span>โทร: {session.contactInfo.phone}</span>
+                    </a>
+                  )}
+
+                  {session.contactInfo.lineId && (
+                    <button
+                      type="button"
+                      onClick={handleCopyLine}
+                      className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1 transition shadow-2xs"
+                    >
+                      <MessageCircle className="w-3 h-3" />
+                      <span>{copiedLine ? 'คัดลอก Line แล้ว' : `Line: ${session.contactInfo.lineId}`}</span>
+                    </button>
+                  )}
                 </div>
               </div>
+            )}
 
-              {/* Organizer Contact Card for Players (Customized in Admin) */}
-              {(session.contactInfo?.phone || session.contactInfo?.lineId || session.contactInfo?.organizerName) && (
-                <div className="bg-gradient-to-r from-indigo-50/70 to-emerald-50/70 border border-indigo-100 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-xs shrink-0">
-                      <Phone className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="min-w-0">
-                      <span className="font-bold text-neutral-900 block truncate">
-                        ติดต่อผู้จัดก๊วน: {session.contactInfo.organizerName || 'แอดมิน'}
-                      </span>
-                      {session.contactInfo.notes && (
-                        <span className="text-[11px] text-neutral-500 block truncate">
-                          {session.contactInfo.notes}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+            {/* Member Switcher */}
+            <div className="p-3 bg-neutral-100/70 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-neutral-700 flex items-center gap-1.5">
+                <UserCheck className="w-4 h-4 text-indigo-600" />
+                <span>เลือกดูบัตรสแกนจ่ายของฉัน / สมาชิก:</span>
+              </span>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {session.contactInfo.phone && (
-                      <a
-                        href={`tel:${session.contactInfo.phone.replace(/[^0-9]/g, '')}`}
-                        className="px-3 py-1.5 rounded-xl bg-white hover:bg-neutral-50 text-indigo-700 border border-indigo-200 font-bold flex items-center gap-1 transition shadow-2xs"
-                      >
-                        <Phone className="w-3 h-3 text-indigo-600" />
-                        <span>โทร: {session.contactInfo.phone}</span>
-                      </a>
-                    )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedParticipantId(null)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition touch-manipulation active:scale-95 ${
+                    !selectedParticipantId
+                      ? 'bg-neutral-900 text-white shadow-xs'
+                      : 'bg-white text-neutral-700 border border-neutral-200 hover:bg-neutral-50'
+                  }`}
+                >
+                  + ลงชื่อคนใหม่
+                </button>
 
-                    {session.contactInfo.lineId && (
-                      <button
-                        type="button"
-                        onClick={handleCopyLine}
-                        className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1 transition shadow-2xs"
-                      >
-                        <MessageCircle className="w-3 h-3" />
-                        <span>{copiedLine ? 'คัดลอก Line แล้ว' : `Line: ${session.contactInfo.lineId}`}</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Sub-Switcher: Select an individual member to view their personal payment card OR Register new */}
-              <div className="p-3 bg-neutral-100/70 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
-                <span className="font-semibold text-neutral-700 flex items-center gap-1.5">
-                  <UserCheck className="w-4 h-4 text-indigo-600" />
-                  <span>เลือกดูบัตรสแกนจ่ายของฉัน / สมาชิก:</span>
-                </span>
-
-                <div className="flex flex-wrap items-center gap-1.5">
+                {session.participants.map((p) => (
                   <button
+                    key={p.id}
                     type="button"
-                    onClick={() => setSelectedParticipantId(null)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition touch-manipulation active:scale-95 ${
-                      !selectedParticipantId
-                        ? 'bg-neutral-900 text-white shadow-xs'
+                    onClick={() => setSelectedParticipantId(p.id)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition touch-manipulation active:scale-95 flex items-center gap-1 ${
+                      selectedParticipantId === p.id
+                        ? 'bg-emerald-600 text-white shadow-xs'
                         : 'bg-white text-neutral-700 border border-neutral-200 hover:bg-neutral-50'
                     }`}
                   >
-                    + ลงชื่อคนใหม่
+                    <span>{p.name}</span>
+                    <span className="font-mono text-[10px] opacity-80">({p.calculatedFee}฿)</span>
+                    {p.slipUrl && <span className="text-[10px]">📎</span>}
                   </button>
-
-                  {session.participants.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => setSelectedParticipantId(p.id)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition touch-manipulation active:scale-95 flex items-center gap-1 ${
-                        selectedParticipantId === p.id
-                          ? 'bg-emerald-600 text-white shadow-xs'
-                          : 'bg-white text-neutral-700 border border-neutral-200 hover:bg-neutral-50'
-                      }`}
-                    >
-                      <span>{p.name}</span>
-                      <span className="font-mono text-[10px] opacity-80">({p.calculatedFee}฿)</span>
-                      {p.slipUrl && <span className="text-[10px]">📎</span>}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* CASE A: VIEWING AN INDIVIDUAL MEMBER'S PAYMENT CARD */}
-              {activeParticipant ? (
-                <div className="bg-emerald-50/70 border border-emerald-300 rounded-3xl p-4 sm:p-5 text-center space-y-4 animate-in fade-in">
-                  <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
-                    <QrCode className="w-6 h-6" />
-                  </div>
-
-                  <div>
-                    <span className="text-xs text-emerald-800 font-bold uppercase tracking-wider">
-                      บัตรชำระเงินรายบุคคล
-                    </span>
-                    <h4 className="text-2xl font-black text-neutral-900 mt-0.5">
-                      {activeParticipant.name}
-                    </h4>
-                    <p className="text-xs text-neutral-600 mt-1">
-                      ลงตี {activeParticipant.hoursPlayed} ชั่วโมง · ยอดที่ต้องชำระ{' '}
-                      <strong className="text-emerald-800 font-bold text-lg font-mono">
-                        {activeParticipant.calculatedFee} บาท
-                      </strong>
-                    </p>
-                  </div>
-
-                  {/* Payment Status Pill */}
-                  <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-white border border-emerald-200 shadow-xs">
-                    {activeParticipant.paymentStatus === 'confirmed' ? (
-                      <>
-                        <CheckCheck className="w-4 h-4 text-emerald-600" />
-                        <span className="text-emerald-800">แอดมินยืนยันยอดเงินแล้ว</span>
-                      </>
-                    ) : activeParticipant.paymentStatus === 'paid' ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-600" />
-                        <span className="text-emerald-800">แจ้งโอนเงินแล้ว (รอแอดมินตรวจสอบสลิป)</span>
-                      </>
-                    ) : activeParticipant.paymentStatus === 'rejected' ? (
-                      <>
-                        <FileX className="w-4 h-4 text-rose-600" />
-                        <span className="text-rose-700">สลิปถูกปฏิเสธ: {activeParticipant.adminRejectReason || 'กรุณาแนบใหม่'}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Clock className="w-4 h-4 text-amber-500 animate-pulse" />
-                        <span className="text-amber-800">รอการชำระเงิน</span>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Slip status preview card if uploaded */}
-                  {activeParticipant.slipUrl && (
-                    <div className="p-3 bg-white rounded-2xl border border-neutral-200/90 text-left flex items-center justify-between gap-3 max-w-md mx-auto">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <img
-                          src={activeParticipant.slipUrl}
-                          alt="สลิปที่แนบ"
-                          className="w-10 h-10 object-cover rounded-xl border border-neutral-200 shrink-0"
-                        />
-                        <div className="min-w-0 text-xs">
-                          <span className="font-bold text-neutral-900 block truncate">
-                            แนบสลิปเรียบร้อยแล้ว
-                          </span>
-                          <span className="text-[11px] text-neutral-500">
-                            {activeParticipant.slipVerification?.detectedBank || 'สลิปการโอนเงิน'} ·{' '}
-                            คะแนนตรวจ {activeParticipant.slipVerification?.score || 90}%
-                          </span>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setInspectingSlipParticipant(activeParticipant)}
-                        className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-semibold flex items-center gap-1 transition"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>ดูสลิป</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Actions for this individual */}
-                  <div className="flex flex-wrap gap-2 justify-center pt-1">
-                    {/* Attach / Change Slip Button */}
-                    <button
-                      type="button"
-                      onClick={() => handleOpenSlipUpload(activeParticipant)}
-                      className="px-5 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition touch-manipulation active:scale-95 flex items-center gap-1.5"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>
-                        {activeParticipant.slipUrl
-                          ? '📎 อัปเดต / แนบสลิปใหม่'
-                          : '📎 แนบสลิปการโอนเงิน (ระบบตรวจสลิป)'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleSendToQueue(activeParticipant)}
-                      disabled={activeParticipant.addedToMatchQueue}
-                      className="px-4 py-2.5 min-h-[44px] rounded-xl text-xs font-semibold bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-40 shadow-xs transition touch-manipulation active:scale-95 flex items-center gap-1.5"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>
-                        {activeParticipant.addedToMatchQueue
-                          ? 'อยู่ในคิวแข่งแล้ว'
-                          : 'ส่งชื่อเข้าคิวแข่งขัน (SmashQueue)'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setSelectedParticipantId(null)}
-                      className="px-3 py-2.5 rounded-xl text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-white transition"
-                    >
-                      + ลงชื่อคนอื่น
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                /* CASE B: NEW INDIVIDUAL REGISTRATION FORM */
-                <form
-                  onSubmit={handleRegisterSubmit}
-                  className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4"
-                >
-                  <div className="space-y-1">
-                    <h4 className="font-bold text-neutral-900 text-sm sm:text-base tracking-tight flex items-center gap-2">
-                      <UserPlus className="w-4 h-4 text-emerald-600" />
-                      <span>ลงชื่อสมาชิกรายบุคคล</span>
-                    </h4>
-                    <p className="text-xs text-neutral-500">
-                      กรอกชื่อของคุณ และเลือกรอบเวลาที่ลงตีเพื่อคำนวณยอดเงินและเจน QR Code ของคุณ
-                    </p>
-                  </div>
-
-                  <div className="space-y-3">
-                    {/* 1. Name */}
-                    <div>
-                      <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                        ชื่อของคุณ หรือ ฉายา (เช่น ต้า, อาร์ท + นัท) *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="พิมพ์ชื่อของคุณ หรือชื่อคู่..."
-                        value={userName}
-                        onChange={(e) => setUserName(e.target.value)}
-                        className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3.5 py-2.5 text-sm text-neutral-900 focus:outline-none focus:border-neutral-900 focus:bg-white transition"
-                      />
-                    </div>
-
-                    {/* 2. Select Time Slots (Rounds of 1 hour) */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-xs font-semibold text-neutral-700">
-                          เลือกรอบเวลาที่ลงตี (รอบละ 1 ชั่วโมง) *
-                        </label>
-                        <span className="text-[11px] text-neutral-500 font-medium">
-                          เลือก {selectedSlotIds.length} ชม.
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                        {timeSlots.map((slot) => {
-                          const isSelected = selectedSlotIds.includes(slot.id);
-                          return (
-                            <button
-                              key={slot.id}
-                              type="button"
-                              onClick={() => handleToggleSlot(slot.id)}
-                              className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-between transition touch-manipulation active:scale-95 ${
-                                isSelected
-                                  ? 'bg-neutral-900 text-white border-neutral-900 shadow-xs'
-                                  : 'bg-neutral-50 text-neutral-700 border-neutral-200 hover:bg-neutral-100'
-                              }`}
-                            >
-                              <span>{slot.label}</span>
-                              {isSelected ? (
-                                <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
-                              ) : (
-                                <span className="w-3.5 h-3.5 rounded-full border border-neutral-300" />
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Calculated Fee Highlight Box */}
-                  <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-3.5 flex items-center justify-between gap-3">
-                    <div>
-                      <span className="text-[11px] text-emerald-800 font-medium block">
-                        ยอดแชร์ค่าสนาม + ค่าลูกแบดของคุณ:
-                      </span>
-                      <span className="text-[11px] text-neutral-500">
-                        (ลงตี {selectedSlotIds.length} ชั่วโมง จากทั้งหมด{' '}
-                        {session.participants.length + 1} คน)
-                      </span>
-                    </div>
-
-                    <div className="text-right">
-                      <span className="font-mono text-2xl sm:text-3xl font-black text-emerald-800 tracking-tight leading-none">
-                        {currentEstimatedFee}
-                      </span>
-                      <span className="text-xs font-bold text-emerald-800 ml-1">บาท</span>
-                    </div>
-                  </div>
-
-                  {/* Submit Button */}
-                  <button
-                    type="submit"
-                    disabled={!userName.trim() || selectedSlotIds.length === 0 || isFull}
-                    className="w-full min-h-[46px] py-3 px-4 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white text-xs sm:text-sm font-bold shadow-xs transition active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed touch-manipulation"
-                  >
-                    {isFull ? 'ก๊วนเต็มแล้ว' : 'ยืนยันลงชื่อ & ออกบัตรสแกนจ่ายเงิน'}
-                  </button>
-                </form>
-              )}
-
-              {/* Individual Payment Section (PromptPay QR & Bank details) */}
-              <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4">
-                <div className="flex items-center justify-between pb-2 border-b border-neutral-100">
-                  <div className="flex items-center gap-2">
-                    <QrCode className="w-4 h-4 text-neutral-800" />
-                    <h4 className="font-bold text-neutral-900 text-sm">
-                      {activeParticipant
-                        ? `ช่องทางชำระเงินของ "${activeParticipant.name}"`
-                        : 'ช่องทางการชำระเงิน (PromptPay & โอนเงิน)'}
-                    </h4>
-                  </div>
-                  <span className="text-[11px] text-neutral-400">สแกนจ่ายผ่านแอปธนาคาร</span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
-                  {/* Left: PromptPay Dynamic QR Code for the specific person */}
-                  <div className="flex flex-col items-center justify-center p-3 bg-neutral-50 border border-neutral-200 rounded-2xl text-center">
-                    <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider mb-2">
-                      PromptPay QR Code เจนตามยอดจริง
-                    </span>
-
-                    <div className="w-48 h-48 bg-white p-2 rounded-2xl border border-neutral-200 shadow-sm flex items-center justify-center relative">
-                      {qrLoading ? (
-                        <div className="text-xs text-neutral-400 animate-pulse">กำลังเจน QR...</div>
-                      ) : qrDataUrl ? (
-                        <img
-                          src={qrDataUrl}
-                          alt="PromptPay QR Code"
-                          className="w-full h-full object-contain rounded-xl"
-                        />
-                      ) : (
-                        <div className="text-xs text-neutral-400 p-2">
-                          แอดมินยังไม่ได้ระบุเบอร์พร้อมเพย์
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="mt-2 text-xs font-mono font-bold text-neutral-800">
-                      ยอดชำระ:{' '}
-                      <span className="text-emerald-700 font-extrabold text-sm">
-                        {currentAmountToPay} บาท
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Right: Bank Details & PromptPay ID with Copy buttons */}
-                  <div className="space-y-3">
-                    {/* PromptPay Info */}
-                    <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/80">
-                      <div className="flex items-center justify-between text-xs mb-1">
-                        <span className="font-semibold text-neutral-600">พร้อมเพย์ (PromptPay)</span>
-                        <button
-                          type="button"
-                          onClick={handleCopyPromptPay}
-                          className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1"
-                        >
-                          {copiedPromptPay ? (
-                            <>
-                              <Check className="w-3 h-3" /> คัดลอกแล้ว
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3 h-3" /> คัดลอก
-                            </>
-                          )}
-                        </button>
-                      </div>
-                      <div className="font-mono text-base font-bold text-neutral-900 tracking-wider">
-                        {session.bankInfo.promptPayId || 'ยังไม่ระบุ'}
-                      </div>
-                      <div className="text-[11px] text-neutral-500 mt-0.5">
-                        ชื่อบัญชี: {session.bankInfo.promptPayName || session.bankInfo.accountName || '-'}
-                      </div>
-                    </div>
-
-                    {/* Bank Transfer Info */}
-                    <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/80">
-                      <div className="flex items-center justify-between text-xs mb-1">
-                        <span className="font-semibold text-neutral-600">
-                          {session.bankInfo.bankName || 'โอนผ่านธนาคาร'}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleCopyBank}
-                          className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1"
-                        >
-                          {copiedBank ? (
-                            <>
-                              <Check className="w-3 h-3" /> คัดลอกแล้ว
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3 h-3" /> คัดลอกเลขบัญชี
-                            </>
-                          )}
-                        </button>
-                      </div>
-                      <div className="font-mono text-base font-bold text-neutral-900 tracking-wider">
-                        {session.bankInfo.accountNumber || 'ยังไม่ระบุ'}
-                      </div>
-                      <div className="text-[11px] text-neutral-500 mt-0.5">
-                        ชื่อบัญชี: {session.bankInfo.accountName || '-'}
-                      </div>
-                    </div>
-
-                    {/* Button to attach slip directly */}
-                    {activeParticipant && (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenSlipUpload(activeParticipant)}
-                        className="w-full py-2.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold border border-indigo-200 flex items-center justify-center gap-1.5 transition touch-manipulation"
-                      >
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>
-                          {activeParticipant.slipUrl ? 'ดูหรืออัปเดตสลิป' : 'แนบสลิปการโอนเงิน (ตรวจสลิปอัตโนมัติ)'}
-                        </span>
-                      </button>
-                    )}
-                  </div>
-                </div>
+                ))}
               </div>
             </div>
-          )}
 
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 2: ROSTER & ATTENDANCE (MEMBER LIST & SLIP INSPECTION)    */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'roster' && (
-            <div className="space-y-4">
-              {/* Financial Quick Status */}
-              <div className="grid grid-cols-3 gap-2.5">
-                <div className="bg-neutral-50 border border-neutral-200/80 p-3 rounded-2xl text-center">
-                  <span className="text-[11px] text-neutral-500 font-medium block">
-                    ค่าใช้จ่ายรวม
-                  </span>
-                  <span className="font-mono text-base sm:text-lg font-bold text-neutral-900">
-                    {totalExpenses}฿
-                  </span>
-                </div>
-                <div className="bg-emerald-50/70 border border-emerald-200 p-3 rounded-2xl text-center">
-                  <span className="text-[11px] text-emerald-800 font-medium block">
-                    แอดมินยืนยันแล้ว
-                  </span>
-                  <span className="font-mono text-base sm:text-lg font-bold text-emerald-800">
-                    {totalCollected}฿
-                  </span>
-                </div>
-                <div className="bg-amber-50/70 border border-amber-200 p-3 rounded-2xl text-center">
-                  <span className="text-[11px] text-amber-800 font-medium block">
-                    รอตรวจสลิป/ค้าง
-                  </span>
-                  <span className="font-mono text-base sm:text-lg font-bold text-amber-800">
-                    {totalPaidPendingAdmin + totalUnpaid}฿
-                  </span>
-                </div>
-              </div>
-
-              {/* Participants Table */}
-              <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-xs">
-                <div className="flex items-center justify-between pb-3 border-b border-neutral-100">
-                  <div className="flex items-center gap-2">
-                    <h4 className="font-bold text-neutral-900 text-sm">
-                      รายชื่อสมาชิกในก๊วน ({session.participants.length}/{session.maxParticipants})
-                    </h4>
-                  </div>
-
-                  <span className="text-xs text-neutral-500 hidden sm:inline">
-                    {isGmailAdmin ? 'แตะ "ตรวจสลิป" เพื่อเช็คและกดยืนยันยอด' : 'แตะ "ดู QR จ่าย" เพื่อดูยอดชำระ'}
-                  </span>
+            {/* CASE A: VIEWING INDIVIDUAL MEMBER PAYMENT CARD */}
+            {activeParticipant ? (
+              <div className="bg-emerald-50/70 border border-emerald-300 rounded-3xl p-4 sm:p-5 text-center space-y-4 animate-in fade-in">
+                <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                  <QrCode className="w-6 h-6" />
                 </div>
 
-                <div className="mt-3 divide-y divide-neutral-100">
-                  {session.participants.length === 0 ? (
-                    <div className="py-8 text-center text-xs text-neutral-400">
-                      ยังไม่มีสมาชิกในก๊วน กดแท็บ "ลงชื่อ & สแกนจ่าย" เพื่อเริ่มลงชื่อ
-                    </div>
+                <div>
+                  <span className="text-xs text-emerald-800 font-bold uppercase tracking-wider">
+                    บัตรชำระเงินรายบุคคล
+                  </span>
+                  <h4 className="text-2xl font-black text-neutral-900 mt-0.5">
+                    {activeParticipant.name}
+                  </h4>
+                  <p className="text-xs text-neutral-600 mt-1">
+                    ลงตี {activeParticipant.hoursPlayed} ชั่วโมง · ยอดที่ต้องชำระ{' '}
+                    <strong className="text-emerald-800 font-bold text-lg font-mono">
+                      {activeParticipant.calculatedFee} บาท
+                    </strong>
+                  </p>
+                </div>
+
+                {/* Payment Status Pill */}
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-white border border-emerald-200 shadow-xs">
+                  {activeParticipant.paymentStatus === 'confirmed' ? (
+                    <>
+                      <CheckCheck className="w-4 h-4 text-emerald-600" />
+                      <span className="text-emerald-800">แอดมินยืนยันยอดเงินแล้ว</span>
+                    </>
+                  ) : activeParticipant.paymentStatus === 'paid' ? (
+                    <>
+                      <Check className="w-4 h-4 text-emerald-600" />
+                      <span className="text-emerald-800">แจ้งโอนเงินแล้ว (รอแอดมินตรวจสอบสลิป)</span>
+                    </>
+                  ) : activeParticipant.paymentStatus === 'rejected' ? (
+                    <>
+                      <FileX className="w-4 h-4 text-rose-600" />
+                      <span className="text-rose-700">สลิปถูกปฏิเสธ: {activeParticipant.adminRejectReason || 'กรุณาแนบใหม่'}</span>
+                    </>
                   ) : (
-                    session.participants.map((p, idx) => (
-                      <div
-                        key={p.id}
-                        className="py-3 flex flex-wrap items-center justify-between gap-2.5"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                          <span className="font-mono font-bold text-xs text-neutral-400 w-5 shrink-0">
-                            #{idx + 1}
-                          </span>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-bold text-sm text-neutral-900 truncate block">
-                                {p.name}
-                              </span>
-                              {/* Slip Badge */}
-                              {p.slipUrl && (
-                                <button
-                                  type="button"
-                                  onClick={() => setInspectingSlipParticipant(p)}
-                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 transition ${
-                                    p.slipVerification?.status === 'flagged'
-                                      ? 'bg-rose-50 text-rose-700 border-rose-200 animate-pulse'
-                                      : p.slipVerification?.status === 'warning'
-                                      ? 'bg-amber-50 text-amber-700 border-amber-200'
-                                      : 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                                  }`}
-                                  title="แตะเพื่อตรวจสอบสลิป"
-                                >
-                                  <span>🧾 สลิป</span>
-                                  {p.slipVerification?.score ? (
-                                    <span className="font-mono">({p.slipVerification.score}%)</span>
-                                  ) : null}
-                                </button>
-                              )}
-                            </div>
-
-                            <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-0.5">
-                              <span>ลงตี {p.hoursPlayed} ชม.</span>
-                              <span aria-hidden="true">·</span>
-                              <span className="font-mono font-bold text-neutral-800">
-                                {p.calculatedFee} บาท
-                              </span>
-                              {p.adminRejectReason && (
-                                <span className="text-rose-600 font-medium truncate max-w-[140px]">
-                                  (ปฏิเสธ: {p.adminRejectReason})
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Status & Actions */}
-                        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                          {/* Slip inspection or attach slip button */}
-                          {p.slipUrl ? (
-                            <button
-                              type="button"
-                              onClick={() => setInspectingSlipParticipant(p)}
-                              className={`px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-semibold border transition touch-manipulation active:scale-95 flex items-center gap-1 ${
-                                p.paymentStatus === 'confirmed'
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                  : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
-                              }`}
-                            >
-                              <FileCheck className="w-3.5 h-3.5" />
-                              <span>{isGmailAdmin ? 'ตรวจสลิป' : 'ดูสลิป'}</span>
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenSlipUpload(p)}
-                              className="px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-medium text-neutral-600 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 transition touch-manipulation flex items-center gap-1"
-                            >
-                              <Upload className="w-3 h-3 text-neutral-400" />
-                              <span className="hidden sm:inline">แนบสลิป</span>
-                            </button>
-                          )}
-
-                          {/* Individual Pay / View QR Button */}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedParticipantId(p.id);
-                              setActiveTab('join');
-                            }}
-                            className="px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200 transition touch-manipulation active:scale-95 flex items-center gap-1"
-                            title="เปิดดู QR Code สแกนจ่ายเงินของคนนี้"
-                          >
-                            <QrCode className="w-3.5 h-3.5 text-emerald-600" />
-                            <span className="hidden sm:inline">QR จ่าย</span>
-                          </button>
-
-                          {/* Payment status badge */}
-                          <div
-                            className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border flex items-center gap-1 ${
-                              p.paymentStatus === 'confirmed'
-                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                : p.paymentStatus === 'paid'
-                                ? 'bg-blue-50 text-blue-800 border-blue-200'
-                                : p.paymentStatus === 'rejected'
-                                ? 'bg-rose-50 text-rose-800 border-rose-200'
-                                : 'bg-amber-50 text-amber-800 border-amber-200'
-                            }`}
-                          >
-                            {p.paymentStatus === 'confirmed' ? (
-                              <>
-                                <CheckCheck className="w-3.5 h-3.5" />
-                                <span>ยืนยันแล้ว</span>
-                              </>
-                            ) : p.paymentStatus === 'paid' ? (
-                              <>
-                                <Clock className="w-3.5 h-3.5" />
-                                <span>รอตรวจ</span>
-                              </>
-                            ) : p.paymentStatus === 'rejected' ? (
-                              <>
-                                <FileX className="w-3.5 h-3.5" />
-                                <span>สลิปไม่ผ่าน</span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                                <span>รอชำระ</span>
-                              </>
-                            )}
-                          </div>
-
-                          {/* Send to Court Match Queue Button */}
-                          <button
-                            type="button"
-                            onClick={() => handleSendToQueue(p)}
-                            disabled={p.addedToMatchQueue}
-                            title="นำชื่อคู่นี้เข้าคิวแข่งขัน SmashQueue"
-                            className="px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-semibold bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-30 shadow-xs transition flex items-center gap-1 touch-manipulation active:scale-95"
-                          >
-                            <Play className="w-3 h-3 fill-current" />
-                            <span className="hidden sm:inline">
-                              {p.addedToMatchQueue ? 'ในคิว' : '+ คิว'}
-                            </span>
-                          </button>
-
-                          {/* Delete participant: STRICTLY PROTECTED BY 2-HOUR LOCKOUT RULE! */}
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveParticipant(p)}
-                            title={
-                              isLockedOut && !isGmailAdmin
-                                ? '🔒 ล็อกรายชื่อแล้ว (ไม่สามารถลบออกได้ภายใน 2 ชม. ก่อนเริ่มจริง)'
-                                : isLockedOut && isGmailAdmin
-                                ? 'ลบรายชื่อ (สิทธิ์แอดมิน - อยู่ในช่วง 2 ชม. ก่อนเริ่ม)'
-                                : 'ยกเลิก / ลบออกจากก๊วน'
-                            }
-                            className={`p-1.5 rounded-lg transition touch-manipulation ${
-                              isLockedOut && !isGmailAdmin
-                                ? 'text-amber-500 bg-amber-50 hover:bg-amber-100 cursor-pointer'
-                                : 'text-neutral-400 hover:text-rose-600 hover:bg-rose-50'
-                            }`}
-                          >
-                            {isLockedOut && !isGmailAdmin ? (
-                              <Lock className="w-3.5 h-3.5 text-amber-600" />
-                            ) : (
-                              <Trash2 className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    ))
+                    <>
+                      <Clock className="w-4 h-4 text-amber-500 animate-pulse" />
+                      <span className="text-amber-800">รอการชำระเงิน</span>
+                    </>
                   )}
                 </div>
-              </div>
-            </div>
-          )}
 
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 3: ADMIN SETUP & FINANCE (STRICTLY GMAIL ADMIN ONLY!)     */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'admin' && isGmailAdmin && (
-            <form onSubmit={handleSaveAdminSettings} className="space-y-4 animate-in fade-in">
-              {adminSavedSuccess && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-800 flex items-center gap-2 animate-in fade-in">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>บันทึกการตั้งค่าก๊วนและข้อมูลติดต่อเรียบร้อยแล้ว</span>
-                </div>
-              )}
-
-              {/* Admin Mode Status Banner & Logout button */}
-              <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200/80 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs text-indigo-950 font-semibold min-w-0">
-                  <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <span className="truncate">
-                    แอดมิน: <strong>{currentUserEmail}</strong>
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleAdminLogout}
-                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-rose-700 bg-white border border-rose-200 hover:bg-rose-50 transition flex items-center gap-1 touch-manipulation shrink-0"
-                >
-                  <LogOut className="w-3 h-3" />
-                  <span>ออกจากระบบ</span>
-                </button>
-              </div>
-
-              {/* 1. General & Venue Info */}
-              <div className="bg-neutral-50/70 border border-neutral-200/80 rounded-2xl p-4 space-y-3">
-                <h4 className="font-bold text-neutral-900 text-xs uppercase tracking-wider">
-                  1. ข้อมูลสถานที่ เวลา และความจุก๊วน
-                </h4>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      สถานที่สนามแบดมินตัน
-                    </label>
-                    <input
-                      type="text"
-                      value={editLocation}
-                      onChange={(e) => setEditLocation(e.target.value)}
-                      placeholder="เช่น สนามแบดมินตัน 71 สปอร์ตคลับ คอร์ด 3-4"
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      วันที่จัดก๊วน
-                    </label>
-                    <input
-                      type="date"
-                      value={editDate}
-                      onChange={(e) => setEditDate(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      จำนวนคนที่รับสูงสุด (Max Participants)
-                    </label>
-                    <input
-                      type="number"
-                      min={2}
-                      max={40}
-                      value={editMaxParticipants}
-                      onChange={(e) => setEditMaxParticipants(parseInt(e.target.value, 10) || 12)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      เวลาเริ่ม (ชั่วโมง เช่น 18 = 18:00)
-                    </label>
-                    <input
-                      type="number"
-                      min={6}
-                      max={23}
-                      value={editStartHour}
-                      onChange={(e) => setEditStartHour(parseInt(e.target.value, 10) || 18)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      เวลาสิ้นสุด (ชั่วโมง เช่น 21 = 21:00)
-                    </label>
-                    <input
-                      type="number"
-                      min={editStartHour + 1}
-                      max={24}
-                      value={editEndHour}
-                      onChange={(e) => setEditEndHour(parseInt(e.target.value, 10) || 21)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* 2. Court & Shuttlecock Pricing */}
-              <div className="bg-neutral-50/70 border border-neutral-200/80 rounded-2xl p-4 space-y-3">
-                <h4 className="font-bold text-neutral-900 text-xs uppercase tracking-wider">
-                  2. อัตราค่าสนาม & ค่าลูกแบดมินตัน
-                </h4>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ราคาสนามต่อชั่วโมงต่อคอร์ด (บาท)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={editCourtHourlyRate}
-                      onChange={(e) => setEditCourtHourlyRate(parseInt(e.target.value, 10) || 0)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      จำนวนคอร์ดที่เช่า (คอร์ด)
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      value={editCourtCount}
-                      onChange={(e) => setEditCourtCount(parseInt(e.target.value, 10) || 1)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ราคาลูกแบดมินตันต่อลูก (บาท)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={editShuttlePrice}
-                      onChange={(e) => setEditShuttlePrice(parseInt(e.target.value, 10) || 0)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      จำนวนลูกแบดที่เตรียม / ใช้จริง (ลูก)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={editShuttleCount}
-                      onChange={(e) => setEditShuttleCount(parseInt(e.target.value, 10) || 0)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      วิธีคิดค่าใช้จ่ายหารกัน
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setEditSplitMethod('per_hour')}
-                        className={`p-2.5 rounded-xl border text-xs font-semibold text-center transition ${
-                          editSplitMethod === 'per_hour'
-                            ? 'bg-neutral-900 text-white border-neutral-900 shadow-xs'
-                            : 'bg-white text-neutral-700 border-neutral-200'
-                        }`}
-                      >
-                        หารตามชั่วโมงที่ลงตี (แนะนำ)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditSplitMethod('equal_all')}
-                        className={`p-2.5 rounded-xl border text-xs font-semibold text-center transition ${
-                          editSplitMethod === 'equal_all'
-                            ? 'bg-neutral-900 text-white border-neutral-900 shadow-xs'
-                            : 'bg-white text-neutral-700 border-neutral-200'
-                        }`}
-                      >
-                        หารเท่ากันทุกคน
-                      </button>
+                {/* Slip preview card if uploaded */}
+                {activeParticipant.slipUrl && (
+                  <div className="p-3 bg-white rounded-2xl border border-neutral-200/90 text-left flex items-center justify-between gap-3 max-w-md mx-auto">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <img
+                        src={activeParticipant.slipUrl}
+                        alt="สลิปที่แนบ"
+                        className="w-10 h-10 object-cover rounded-xl border border-neutral-200 shrink-0"
+                      />
+                      <div className="min-w-0 text-xs">
+                        <span className="font-bold text-neutral-900 block truncate">
+                          แนบสลิปเรียบร้อยแล้ว
+                        </span>
+                        <span className="text-[11px] text-neutral-500">
+                          {activeParticipant.slipVerification?.detectedBank || 'สลิปการโอนเงิน'} ·{' '}
+                          คะแนนตรวจ {activeParticipant.slipVerification?.score || 90}%
+                        </span>
+                      </div>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setInspectingSlipParticipant(activeParticipant)}
+                      className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-semibold flex items-center gap-1 transition"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>ดูสลิป</span>
+                    </button>
                   </div>
+                )}
+
+                {/* Actions for this individual */}
+                <div className="flex flex-wrap gap-2 justify-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenSlipUpload(activeParticipant)}
+                    className="px-5 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition touch-manipulation active:scale-95 flex items-center gap-1.5"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>
+                      {activeParticipant.slipUrl
+                        ? '📎 อัปเดต / แนบสลิปใหม่'
+                        : '📎 แนบสลิปการโอนเงิน (ระบบตรวจสลิป)'}
+                    </span>
+                  </button>
+
+                  {/* Manual Court Queue Button if desired */}
+                  <button
+                    type="button"
+                    onClick={() => handleSendToQueue(activeParticipant)}
+                    disabled={activeParticipant.addedToMatchQueue}
+                    className="px-4 py-2.5 min-h-[44px] rounded-xl text-xs font-semibold bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-40 shadow-xs transition touch-manipulation active:scale-95 flex items-center gap-1.5"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>
+                      {activeParticipant.addedToMatchQueue
+                        ? 'อยู่ในคิวแข่งแล้ว'
+                        : 'ส่งชื่อเข้าคิวแข่งขันหน้าคอร์ด'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSelectedParticipantId(null)}
+                    className="px-3 py-2.5 rounded-xl text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-white transition"
+                  >
+                    + ลงชื่อคนอื่น
+                  </button>
                 </div>
               </div>
+            ) : (
+              /* CASE B: NEW INDIVIDUAL REGISTRATION FORM */
+              <form
+                onSubmit={handleRegisterSubmit}
+                className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4"
+              >
+                <div className="space-y-1">
+                  <h4 className="font-bold text-neutral-900 text-sm sm:text-base tracking-tight flex items-center gap-2">
+                    <UserPlus className="w-4 h-4 text-emerald-600" />
+                    <span>ลงชื่อสมาชิกรายบุคคล</span>
+                  </h4>
+                  <p className="text-xs text-neutral-500">
+                    กรอกชื่อของคุณ และเลือกรอบเวลาที่ลงตีเพื่อคำนวณยอดเงินและออกบัตร QR Code
+                  </p>
+                </div>
 
-              {/* 3. Bank & PromptPay Account for QR Code */}
-              <div className="bg-neutral-50/70 border border-neutral-200/80 rounded-2xl p-4 space-y-3">
-                <h4 className="font-bold text-neutral-900 text-xs uppercase tracking-wider">
-                  3. ข้อมูลบัญชีรับเงิน & พร้อมเพย์ (PromptPay)
-                </h4>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-3">
                   <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      เบอร์พร้อมเพย์ (มือถือ หรือ เลขบัตร ปชช.) *
+                    <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                      ชื่อของคุณ หรือ ฉายา (เช่น ต้า, อาร์ท + นัท) *
                     </label>
                     <input
                       type="text"
                       required
-                      placeholder="เช่น 0891234567 หรือ 1100500123456"
-                      value={editPromptPayId}
-                      onChange={(e) => setEditPromptPayId(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 font-mono font-bold"
+                      placeholder="พิมพ์ชื่อของคุณ..."
+                      value={userName}
+                      onChange={(e) => setUserName(e.target.value)}
+                      className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3.5 py-2.5 text-sm text-neutral-900 focus:outline-none focus:border-neutral-900 focus:bg-white transition"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ชื่อบัญชีพร้อมเพย์
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น สมชาย แอดมินก๊วน"
-                      value={editPromptPayName}
-                      onChange={(e) => setEditPromptPayName(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-semibold text-neutral-700">
+                        เลือกรอบเวลาที่ลงตี (รอบละ 1 ชั่วโมง) *
+                      </label>
+                      <span className="text-[11px] text-neutral-500 font-medium">
+                        เลือก {selectedSlotIds.length} ชม.
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      {timeSlots.map((slot) => {
+                        const isSelected = selectedSlotIds.includes(slot.id);
+                        return (
+                          <button
+                            key={slot.id}
+                            type="button"
+                            onClick={() => handleToggleSlot(slot.id)}
+                            className={`py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-between transition touch-manipulation active:scale-95 ${
+                              isSelected
+                                ? 'bg-neutral-900 text-white border-neutral-900 shadow-xs'
+                                : 'bg-neutral-50 text-neutral-700 border-neutral-200 hover:bg-neutral-100'
+                            }`}
+                          >
+                            <span>{slot.label}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ธนาคาร
+                    <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                      เบอร์โทรศัพท์ (ไม่บังคับ)
                     </label>
                     <input
-                      type="text"
-                      placeholder="เช่น กสิกรไทย (KBANK), ไทยพาณิชย์ (SCB)"
-                      value={editBankName}
-                      onChange={(e) => setEditBankName(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      เลขที่บัญชีธนาคาร
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น 095-2-88741-9"
-                      value={editAccountNumber}
-                      onChange={(e) => setEditAccountNumber(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 font-mono"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ชื่อบัญชีธนาคาร
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น นายสมชาย จัดก๊วนแบดมินตัน"
-                      value={editAccountName}
-                      onChange={(e) => setEditAccountName(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                      type="tel"
+                      placeholder="เช่น 089-xxx-xxxx"
+                      value={userPhone}
+                      onChange={(e) => setUserPhone(e.target.value)}
+                      className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3.5 py-2 text-sm text-neutral-900 focus:outline-none focus:border-neutral-900 focus:bg-white transition"
                     />
                   </div>
                 </div>
-              </div>
 
-              {/* 4. Organizer Contact Info (Customized by Admin) */}
-              <div className="bg-neutral-50/70 border border-neutral-200/80 rounded-2xl p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Phone className="w-4 h-4 text-indigo-600" />
-                  <h4 className="font-bold text-neutral-900 text-xs uppercase tracking-wider">
-                    4. ข้อมูลติดต่อผู้จัดก๊วน (แสดงให้สมาชิกเห็นสำหรับโทรสอบถามหรือส่งสลิป)
-                  </h4>
+                {/* Estimated Fee Preview */}
+                <div className="p-3 bg-emerald-50/70 border border-emerald-200/90 rounded-2xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-emerald-900 block">
+                      ยอดเงินโดยประมาณสำหรับ {selectedSlotIds.length} ชม.
+                    </span>
+                    <span className="text-[11px] text-emerald-700">
+                      คำนวณตามสูตรหารก๊วน ({session.splitMethod === 'per_hour' ? 'ตามชั่วโมงจริง' : 'หารเท่า'})
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-mono text-xl font-black text-emerald-800">
+                      {currentEstimatedFee}
+                    </span>
+                    <span className="text-xs font-bold text-emerald-800 ml-1">บาท</span>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ชื่อผู้จัดก๊วน / ฉายา
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น สมชาย (ผู้จัดก๊วน) หรือ แอดมินต้า"
-                      value={editContactName}
-                      onChange={(e) => setEditContactName(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      เบอร์โทรศัพท์ติดต่อ (สมาชิกสามารถกดโทรออกได้ทันที)
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น 089-123-4567"
-                      value={editContactPhone}
-                      onChange={(e) => setEditContactPhone(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 font-mono font-bold"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      Line ID หรือ ลิงก์ Line
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น @badminton71 หรือ somchai_badminton"
-                      value={editContactLine}
-                      onChange={(e) => setEditContactLine(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      Facebook หรือ ช่องทางอื่น (ไม่บังคับ)
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น ก๊วนแบดมินตัน วินเนอร์ อารีน่า"
-                      value={editContactFacebook}
-                      onChange={(e) => setEditContactFacebook(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-neutral-600 mb-1">
-                      ข้อความแนะนำการติดต่อสำหรับผู้เล่น
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="เช่น โทรด่วนหากมีเหตุฉุกเฉินเรื่องสลิป หรือโทรแจ้งหากมาสาย"
-                      value={editContactNotes}
-                      onChange={(e) => setEditContactNotes(e.target.value)}
-                      className="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Submit Button */}
-              <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="submit"
-                  className="px-6 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-neutral-900 hover:bg-neutral-800 text-white shadow-xs transition active:scale-95 touch-manipulation"
+                  disabled={!userName.trim() || selectedSlotIds.length === 0 || isFull}
+                  className="w-full min-h-[46px] py-3 px-4 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white text-xs sm:text-sm font-bold shadow-xs transition active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed touch-manipulation"
                 >
-                  บันทึกการตั้งค่าก๊วน & ข้อมูลติดต่อ
+                  {isFull ? 'ก๊วนเต็มแล้ว' : 'ยืนยันลงชื่อ & ออกบัตรสแกนจ่ายเงิน'}
                 </button>
-              </div>
-            </form>
-          )}
-        </div>
-
-        {/* Modal Sticky Footer */}
-        <div className="pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500 shrink-0">
-          <div className="flex items-center gap-2">
-            <span>
-              ยอดรวมก๊วน: <strong>{totalExpenses}฿</strong> (ยืนยันแล้ว {totalCollected}฿)
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {!isGmailAdmin && (
-              <button
-                type="button"
-                onClick={() => {
-                  setEmailLoginError(null);
-                  setIsGmailLoginModalOpen(true);
-                }}
-                className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 transition touch-manipulation"
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>เข้าสู่ระบบผู้จัด</span>
-              </button>
+              </form>
             )}
 
+            {/* ------------------------------------------------------------- */}
+            {/* THAI QR PAYMENT / PROMPTPAY SECTION (100% BOT STANDARD)      */}
+            {/* ------------------------------------------------------------- */}
+            <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between pb-2 border-b border-neutral-100">
+                <div className="flex items-center gap-2">
+                  <QrCode className="w-4 h-4 text-neutral-800" />
+                  <h4 className="font-bold text-neutral-900 text-sm">
+                    {activeParticipant
+                      ? `ช่องทางชำระเงินของ "${activeParticipant.name}"`
+                      : 'ช่องทางการชำระเงิน (Thai QR PromptPay & โอนเงิน)'}
+                  </h4>
+                </div>
+                <span className="text-[11px] text-neutral-400">สแกนจ่ายได้ทุกแอปธนาคารไทย</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+                {/* Left: Official Thai QR Payment Box */}
+                <div className="flex flex-col items-center justify-center p-3 sm:p-4 bg-gradient-to-b from-[#002d62] via-[#002855] to-[#001f42] text-white rounded-3xl text-center shadow-md">
+                  {/* Thai QR Banner */}
+                  <div className="w-full pb-2 mb-2 border-b border-white/20 flex items-center justify-between px-2">
+                    <div className="text-left">
+                      <span className="text-[10px] font-bold tracking-widest uppercase block text-sky-200">
+                        THAI QR PAYMENT
+                      </span>
+                      <span className="text-[9px] text-white/70 block">
+                        พร้อมเพย์ (PromptPay)
+                      </span>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-md bg-white/15 text-[10px] font-bold text-white">
+                      BOT Standard
+                    </span>
+                  </div>
+
+                  {/* QR Image Canvas Container */}
+                  <div className="w-52 h-52 bg-white p-3 rounded-2xl shadow-inner flex items-center justify-center relative">
+                    {qrLoading ? (
+                      <div className="text-xs text-neutral-400 animate-pulse flex flex-col items-center gap-1.5">
+                        <RefreshCw className="w-6 h-6 animate-spin text-indigo-600" />
+                        <span>กำลังเจน PromptPay QR...</span>
+                      </div>
+                    ) : qrDataUrl ? (
+                      <img
+                        src={qrDataUrl}
+                        alt="PromptPay QR Code"
+                        className="w-full h-full object-contain rounded-lg"
+                      />
+                    ) : (
+                      <div className="text-xs text-neutral-400 p-2">
+                        แอดมินยังไม่ได้ระบุเบอร์พร้อมเพย์
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Amount Pill */}
+                  <div className="mt-3 w-full bg-white/10 backdrop-blur-xs rounded-xl py-1.5 px-3 flex items-center justify-between text-xs">
+                    <span className="text-white/80 text-[11px]">ยอดเงินใน QR:</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono font-black text-amber-300 text-sm sm:text-base">
+                        {currentAmountToPay > 0 ? `${currentAmountToPay}.00` : 'ระบุยอดเอง'}
+                      </span>
+                      <span className="text-[11px] text-white/90">บาท</span>
+                      {currentAmountToPay > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleCopyAmount}
+                          className="p-1 hover:bg-white/20 rounded transition text-white/80"
+                          title="คัดลอกยอดเงิน"
+                        >
+                          {copiedAmount ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Download QR button for mobile users */}
+                  {qrDataUrl && (
+                    <button
+                      type="button"
+                      onClick={handleDownloadQr}
+                      className="mt-2.5 w-full py-2 px-3 rounded-xl bg-white text-neutral-900 hover:bg-neutral-100 text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95 shadow-xs"
+                    >
+                      <Download className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>📥 บันทึกรูป QR ลงเครื่อง (ไว้สแกนในแอป)</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Right: Bank Details & PromptPay ID with Copy buttons */}
+                <div className="space-y-3">
+                  {/* PromptPay Info */}
+                  <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/80">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-semibold text-neutral-600">พร้อมเพย์ (PromptPay)</span>
+                      <button
+                        type="button"
+                        onClick={handleCopyPromptPay}
+                        className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1"
+                      >
+                        {copiedPromptPay ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600" /> คัดลอกแล้ว
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" /> คัดลอกเบอร์
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="font-mono text-base font-bold text-neutral-900 tracking-wider">
+                      {formatPromptPayDisplay(session.bankInfo.promptPayId) || 'ยังไม่ระบุ'}
+                    </div>
+                    <div className="text-[11px] text-neutral-500 mt-0.5">
+                      ชื่อบัญชี: {session.bankInfo.promptPayName || session.bankInfo.accountName || '-'}
+                    </div>
+                  </div>
+
+                  {/* Bank Transfer Info */}
+                  <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/80">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-semibold text-neutral-600">
+                        {session.bankInfo.bankName || 'โอนผ่านธนาคาร'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleCopyBank}
+                        className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1"
+                      >
+                        {copiedBank ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600" /> คัดลอกแล้ว
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" /> คัดลอกเลขบัญชี
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="font-mono text-base font-bold text-neutral-900 tracking-wider">
+                      {session.bankInfo.accountNumber || 'ยังไม่ระบุ'}
+                    </div>
+                    <div className="text-[11px] text-neutral-500 mt-0.5">
+                      ชื่อบัญชี: {session.bankInfo.accountName || '-'}
+                    </div>
+                  </div>
+
+                  {/* Direct Attach Slip Button */}
+                  {activeParticipant && (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenSlipUpload(activeParticipant)}
+                      className="w-full py-2.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold border border-indigo-200 flex items-center justify-center gap-1.5 transition touch-manipulation"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>
+                        {activeParticipant.slipUrl ? 'ดูหรืออัปเดตสลิป' : 'แนบสลิปการโอนเงิน (ตรวจสลิปอัตโนมัติ)'}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ------------------------------------------------------------- */}
+        {/* TAB 2: ROSTER & ATTENDANCE (MEMBER LIST & SLIP INSPECTION)    */}
+        {/* ------------------------------------------------------------- */}
+        {activeTab === 'roster' && (
+          <div className="space-y-4">
+            {/* Financial Quick Status */}
+            <div className="grid grid-cols-3 gap-2.5">
+              <div className="bg-neutral-50 border border-neutral-200/80 p-3 rounded-2xl text-center">
+                <span className="text-[11px] text-neutral-500 font-medium block">
+                  ค่าใช้จ่ายรวม
+                </span>
+                <span className="font-mono font-bold text-sm sm:text-base text-neutral-900 block mt-0.5">
+                  {totalExpenses} ฿
+                </span>
+              </div>
+
+              <div className="bg-emerald-50 border border-emerald-200/80 p-3 rounded-2xl text-center">
+                <span className="text-[11px] text-emerald-700 font-medium block">
+                  ยืนยันแล้ว
+                </span>
+                <span className="font-mono font-bold text-sm sm:text-base text-emerald-800 block mt-0.5">
+                  {totalCollected} ฿
+                </span>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200/80 p-3 rounded-2xl text-center">
+                <span className="text-[11px] text-amber-700 font-medium block">
+                  รอตรวจ / ค้าง
+                </span>
+                <span className="font-mono font-bold text-sm sm:text-base text-amber-800 block mt-0.5">
+                  {totalPaidPendingAdmin + totalUnpaid} ฿
+                </span>
+              </div>
+            </div>
+
+            {/* Sync to Court Queue Action if Synced Mode */}
+            {session.syncWithCourtQueue && isGmailAdmin && (
+              <div className="p-3 bg-indigo-50 border border-indigo-200/80 rounded-2xl flex items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <Link2 className="w-4 h-4 text-indigo-600" />
+                  <span className="text-indigo-950 font-medium">
+                    โหมดซิงก์เปิดอยู่: ต้องการซิงก์รายชื่อทั้งหมดเข้าสู่คิวคอร์ดหรือไม่?
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSyncAllToCourtQueue}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-600 text-white font-bold text-xs hover:bg-indigo-700 transition shadow-2xs active:scale-95"
+                >
+                  🔄 ซิงก์เข้าคิวคอร์ดทันที
+                </button>
+              </div>
+            )}
+
+            {/* Participant Roster Table */}
+            <div className="space-y-2">
+              {session.participants.length === 0 ? (
+                <div className="text-center py-10 bg-neutral-50 rounded-3xl border border-dashed border-neutral-200 text-neutral-400 space-y-2">
+                  <Users className="w-8 h-8 mx-auto text-neutral-300" />
+                  <p className="text-xs">ยังไม่มีสมาชิกในก๊วนนี้</p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('join')}
+                    className="text-xs text-indigo-600 font-semibold underline"
+                  >
+                    + ลงชื่อคนแรก
+                  </button>
+                </div>
+              ) : (
+                session.participants.map((p, idx) => (
+                  <div
+                    key={p.id}
+                    className="p-3 sm:p-3.5 bg-white border border-neutral-200/90 rounded-2xl flex items-center justify-between gap-2 sm:gap-3 transition hover:border-neutral-300"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-6 h-6 rounded-full bg-neutral-100 text-neutral-600 text-[11px] font-bold flex items-center justify-center shrink-0">
+                        {idx + 1}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-sm text-neutral-900 truncate">
+                            {p.name}
+                          </span>
+                          {p.phone && (
+                            <span className="text-[10px] text-neutral-400 font-mono">
+                              ({p.phone})
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-0.5">
+                          <span>ลงตี {p.hoursPlayed} ชม.</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono font-bold text-neutral-800">
+                            {p.calculatedFee} บาท
+                          </span>
+                          {p.adminRejectReason && (
+                            <span className="text-rose-600 font-medium truncate max-w-[140px]">
+                              (ปฏิเสธ: {p.adminRejectReason})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Status & Actions */}
+                    <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                      {/* Slip inspect or attach */}
+                      {p.slipUrl ? (
+                        <button
+                          type="button"
+                          onClick={() => setInspectingSlipParticipant(p)}
+                          className={`px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-semibold border transition touch-manipulation active:scale-95 flex items-center gap-1 ${
+                            p.paymentStatus === 'confirmed'
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                              : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                          }`}
+                        >
+                          <FileCheck className="w-3.5 h-3.5" />
+                          <span>{isGmailAdmin ? 'ตรวจสลิป' : 'ดูสลิป'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSlipUpload(p)}
+                          className="px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-medium text-neutral-600 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 transition touch-manipulation flex items-center gap-1"
+                        >
+                          <Upload className="w-3 h-3 text-neutral-400" />
+                          <span className="hidden sm:inline">แนบสลิป</span>
+                        </button>
+                      )}
+
+                      {/* View QR Code */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedParticipantId(p.id);
+                          setActiveTab('join');
+                        }}
+                        className="px-2.5 py-1 min-h-[30px] rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200 transition touch-manipulation active:scale-95 flex items-center gap-1"
+                        title="เปิดดู QR Code สแกนจ่ายเงินของคนนี้"
+                      >
+                        <QrCode className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="hidden sm:inline">QR จ่าย</span>
+                      </button>
+
+                      {/* Payment Status Badge */}
+                      <div
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border flex items-center gap-1 ${
+                          p.paymentStatus === 'confirmed'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : p.paymentStatus === 'paid'
+                            ? 'bg-blue-50 text-blue-800 border-blue-200'
+                            : p.paymentStatus === 'rejected'
+                            ? 'bg-rose-50 text-rose-800 border-rose-200'
+                            : 'bg-amber-50 text-amber-800 border-amber-200'
+                        }`}
+                      >
+                        {p.paymentStatus === 'confirmed' ? (
+                          <>
+                            <CheckCheck className="w-3.5 h-3.5" />
+                            <span>ยืนยันแล้ว</span>
+                          </>
+                        ) : p.paymentStatus === 'paid' ? (
+                          <>
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>รอตรวจ</span>
+                          </>
+                        ) : p.paymentStatus === 'rejected' ? (
+                          <>
+                            <FileX className="w-3.5 h-3.5" />
+                            <span>ปฏิเสธ</span>
+                          </>
+                        ) : (
+                          <span>รอชำระ</span>
+                        )}
+                      </div>
+
+                      {/* Remove Button protected by 2-hour rule */}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveParticipant(p)}
+                        className={`p-1.5 rounded-xl transition touch-manipulation ${
+                          isLockedOut && !isGmailAdmin
+                            ? 'text-neutral-300 hover:text-neutral-400 bg-neutral-50'
+                            : 'text-neutral-400 hover:text-rose-600 hover:bg-rose-50'
+                        }`}
+                        title={
+                          isLockedOut
+                            ? isGmailAdmin
+                              ? 'สิทธิ์แอดมิน: บังคับลบได้'
+                              : 'ล็อกรายชื่อแล้ว ไม่สามารถยกเลิกได้ (อยู่ในช่วง 2 ชม. ก่อนเริ่ม)'
+                            : 'ลบรายชื่อ'
+                        }
+                      >
+                        {isLockedOut && !isGmailAdmin ? (
+                          <Lock className="w-4 h-4 text-neutral-400" />
+                        ) : (
+                          <Trash2 className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ------------------------------------------------------------- */}
+        {/* TAB 3: ADMIN SETTINGS & SYNC CONFIGURATION (ADMIN ONLY)       */}
+        {/* ------------------------------------------------------------- */}
+        {activeTab === 'admin' && isGmailAdmin && (
+          <form onSubmit={handleSaveAdminSettings} className="space-y-4 animate-in fade-in">
+            {/* Admin Identity Card */}
+            <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/90 flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                <span className="font-semibold text-neutral-800">
+                  คุณมีสิทธิ์เข้าถึงการตั้งค่าก๊วน (แอดมิน)
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleAdminLogout}
+                className="text-[11px] text-neutral-500 hover:text-rose-600 font-semibold transition"
+              >
+                ออกจากสิทธิ์แอดมิน
+              </button>
+            </div>
+
+            {/* SYNC SETTING: SEPARATE VS SYNC WITH COURT QUEUE */}
+            <div className="p-4 bg-white rounded-3xl border border-neutral-200/90 shadow-2xs space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-9 h-9 rounded-2xl flex items-center justify-center ${
+                      editSyncWithCourtQueue
+                        ? 'bg-indigo-50 text-indigo-700'
+                        : 'bg-neutral-100 text-neutral-600'
+                    }`}
+                  >
+                    {editSyncWithCourtQueue ? (
+                      <Link2 className="w-5 h-5" />
+                    ) : (
+                      <Unlink className="w-5 h-5" />
+                    )}
+                  </div>
+                  <div>
+                    <h5 className="font-bold text-neutral-900 text-sm">
+                      การเชื่อมต่อระหว่างก๊วนแบด กับระบบจัดคอร์ด & จัดคิว
+                    </h5>
+                    <p className="text-[11px] text-neutral-500">
+                      แอดมินเลือกได้ว่าจะแยกการทำงานอิสระ หรือซิงก์รายชื่อสมาชิกเข้าสู่คิวคอร์ด
+                    </p>
+                  </div>
+                </div>
+
+                {/* Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setEditSyncWithCourtQueue(!editSyncWithCourtQueue)}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    editSyncWithCourtQueue ? 'bg-indigo-600' : 'bg-neutral-300'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      editSyncWithCourtQueue ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div
+                className={`p-3 rounded-2xl border text-xs leading-relaxed ${
+                  editSyncWithCourtQueue
+                    ? 'bg-indigo-50/60 border-indigo-200 text-indigo-950'
+                    : 'bg-neutral-50 border-neutral-200 text-neutral-700'
+                }`}
+              >
+                {editSyncWithCourtQueue ? (
+                  <div className="space-y-1">
+                    <strong className="block text-indigo-900 flex items-center gap-1">
+                      🔗 โหมดเปิดซิงก์:
+                    </strong>
+                    <span>
+                      เมื่อสมาชิกทำการลงชื่อในก๊วนนี้ รายชื่อจะถูกส่งเข้าสู่คิวผู้ท้าชิง (SmashQueue)
+                      หน้าคอร์ดแข่งขันอัตโนมัติ
+                    </span>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <strong className="block text-neutral-900 flex items-center gap-1">
+                      ✂️ โหมดแยกอิสระ (แนะนำ):
+                    </strong>
+                    <span>
+                      ก๊วนแบดและระบบจัดคอร์ดทำงานแยกจากกัน 100% สมาชิกในก๊วนจะไม่ถูกแทรกเข้าคิวคอร์ด
+                      ผู้ดูแลคอร์ดสามารถจัดคิวหน้าสนามได้อิสระตามสถานการณ์จริง
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Session Settings */}
+            <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-2xs space-y-3">
+              <h5 className="font-bold text-neutral-900 text-xs sm:text-sm">
+                1. ข้อมูลสนาม & วันเวลา
+              </h5>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ชื่อสนาม & คอร์ด
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editLocation}
+                    onChange={(e) => setEditLocation(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    วันที่จัดก๊วน
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={editDate}
+                    onChange={(e) => setEditDate(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    จำนวนคนที่รับได้สูงสุด
+                  </label>
+                  <input
+                    type="number"
+                    min={2}
+                    max={50}
+                    value={editMaxParticipants}
+                    onChange={(e) => setEditMaxParticipants(parseInt(e.target.value, 10) || 12)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    เวลาเริ่ม (น.)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={23}
+                    value={editStartHour}
+                    onChange={(e) => setEditStartHour(parseInt(e.target.value, 10) || 18)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    เวลาสิ้นสุด (น.)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={24}
+                    value={editEndHour}
+                    onChange={(e) => setEditEndHour(parseInt(e.target.value, 10) || 21)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Financial Calculation Settings */}
+            <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-2xs space-y-3">
+              <h5 className="font-bold text-neutral-900 text-xs sm:text-sm">
+                2. ค่าใช้จ่าย & การหารเงิน
+              </h5>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ค่าคอร์ด/ชม. (฿)
+                  </label>
+                  <input
+                    type="number"
+                    value={editCourtHourlyRate}
+                    onChange={(e) => setEditCourtHourlyRate(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    จำนวนคอร์ด
+                  </label>
+                  <input
+                    type="number"
+                    value={editCourtCount}
+                    onChange={(e) => setEditCourtCount(parseInt(e.target.value, 10) || 1)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ค่าลูกแบด/ลูก (฿)
+                  </label>
+                  <input
+                    type="number"
+                    value={editShuttlePrice}
+                    onChange={(e) => setEditShuttlePrice(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ประมาณการลูก
+                  </label>
+                  <input
+                    type="number"
+                    value={editShuttleCount}
+                    onChange={(e) => setEditShuttleCount(parseInt(e.target.value, 10) || 0)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-neutral-600 mb-1.5">
+                  รูปแบบการหารค่าใช้จ่าย
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditSplitMethod('per_hour')}
+                    className={`p-2.5 rounded-xl border text-xs font-semibold text-left transition ${
+                      editSplitMethod === 'per_hour'
+                        ? 'bg-neutral-900 text-white border-neutral-900 shadow-xs'
+                        : 'bg-neutral-50 text-neutral-700 border-neutral-200'
+                    }`}
+                  >
+                    <span>หารตามชั่วโมงที่ลงตี</span>
+                    <span className="block text-[10px] opacity-75 font-normal">
+                      ตี 1 ชม. จ่าย 1 ชม. เป็นธรรม
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setEditSplitMethod('equal_all')}
+                    className={`p-2.5 rounded-xl border text-xs font-semibold text-left transition ${
+                      editSplitMethod === 'equal_all'
+                        ? 'bg-neutral-900 text-white border-neutral-900 shadow-xs'
+                        : 'bg-neutral-50 text-neutral-700 border-neutral-200'
+                    }`}
+                  >
+                    <span>หารเท่ากันทุกคน</span>
+                    <span className="block text-[10px] opacity-75 font-normal">
+                      เหมาจ่ายเท่ากันทั้งก๊วน
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Bank Info & PromptPay Target */}
+            <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-2xs space-y-3">
+              <h5 className="font-bold text-neutral-900 text-xs sm:text-sm">
+                3. บัญชีรับเงิน & พร้อมเพย์ (สร้าง QR สแกนจ่าย)
+              </h5>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    เบอร์พร้อมเพย์ (PromptPay ID) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="เช่น 0891234567 หรือ เลขบัตร ปชช."
+                    value={editPromptPayId}
+                    onChange={(e) => setEditPromptPayId(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ชื่อบัญชีพร้อมเพย์
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น สมชาย (ผู้จัดก๊วน)"
+                    value={editPromptPayName}
+                    onChange={(e) => setEditPromptPayName(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ธนาคาร (โอนปกติ)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น กสิกรไทย, SCB, กรุงไทย"
+                    value={editBankName}
+                    onChange={(e) => setEditBankName(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    เลขที่บัญชีธนาคาร
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น 095-x-xxxxx-x"
+                    value={editAccountNumber}
+                    onChange={(e) => setEditAccountNumber(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    รหัส PIN แอดมินสำหรับปลดล็อกตั้งค่าก๊วน
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="ค่าเริ่มต้น 1234"
+                    value={editAdminPin}
+                    onChange={(e) => setEditAdminPin(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Organizer Contact Info */}
+            <div className="bg-white border border-neutral-200/90 rounded-3xl p-4 sm:p-5 shadow-2xs space-y-3">
+              <h5 className="font-bold text-neutral-900 text-xs sm:text-sm">
+                4. ข้อมูลติดต่อผู้จัดก๊วน (แสดงให้สมาชิกเห็น)
+              </h5>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ชื่อผู้จัดก๊วน (ฉายา)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น พี่สมชาย, ต้า ผู้จัด"
+                    value={editContactName}
+                    onChange={(e) => setEditContactName(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    เบอร์โทรศัพท์ติดต่อด่วน
+                  </label>
+                  <input
+                    type="tel"
+                    placeholder="เช่น 089-123-4567"
+                    value={editContactPhone}
+                    onChange={(e) => setEditContactPhone(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    Line ID / OpenChat
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น @badminton71"
+                    value={editContactLine}
+                    onChange={(e) => setEditContactLine(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    Facebook Group / Page
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น ก๊วนแบดวันอังคาร วินเนอร์"
+                    value={editContactFacebook}
+                    onChange={(e) => setEditContactFacebook(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-neutral-600 mb-1">
+                    ข้อความแนะนำการติดต่อสำหรับผู้เล่น
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="เช่น โทรด่วนหากมีเหตุฉุกเฉินเรื่องสลิป หรือโทรแจ้งหากมาสาย"
+                    value={editContactNotes}
+                    onChange={(e) => setEditContactNotes(e.target.value)}
+                    className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="submit"
+                className="px-6 py-2.5 min-h-[44px] rounded-xl text-xs font-bold bg-neutral-900 hover:bg-neutral-800 text-white shadow-xs transition active:scale-95 touch-manipulation"
+              >
+                บันทึกการตั้งค่าก๊วน & ซิงก์คอร์ด
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+
+      {/* Modal Sticky Footer */}
+      <div className="pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500 shrink-0">
+        <div className="flex items-center gap-2">
+          <span>
+            ยอดรวมก๊วน: <strong>{totalExpenses}฿</strong> (ยืนยันแล้ว {totalCollected}฿)
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {!isGmailAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setLoginError(null);
+                setIsLoginModalOpen(true);
+              }}
+              className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 transition touch-manipulation"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>เข้าสู่ระบบผู้จัด</span>
+            </button>
+          )}
+
+          {!asEmbeddedView && (
             <button
               type="button"
               onClick={onClose}
@@ -1907,77 +2139,102 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
             >
               ปิด
             </button>
-          </div>
+          )}
         </div>
       </div>
 
       {/* ------------------------------------------------------------- */}
-      {/* DIALOG 1: FAST & SIMPLE IN-APP GMAIL LOGIN (Zero Popups)      */}
+      {/* DIALOG 1: SECURE ADMIN LOGIN (NO SENSITIVE DATA EXPOSED)      */}
       {/* ------------------------------------------------------------- */}
-      {isGmailLoginModalOpen && (
+      {isLoginModalOpen && (
         <div className="fixed inset-0 z-60 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-sm w-full shadow-2xl border border-neutral-200 space-y-4 animate-in fade-in zoom-in-95">
             <div className="text-center space-y-1.5">
               <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto shadow-inner">
-                <ShieldCheck className="w-6 h-6" />
+                <KeyRound className="w-6 h-6" />
               </div>
               <h4 className="font-bold text-neutral-900 text-base">เข้าสู่ระบบผู้จัดก๊วน (แอดมิน)</h4>
               <p className="text-xs text-neutral-500 leading-relaxed">
-                เข้าสู่ระบบง่ายๆ เพื่อจัดการตั้งค่าก๊วนและตรวจสอบสลิป โดยไม่ต้องรอหน้าต่างป๊อปอัป
+                กรุณาระบุรหัส PIN แอดมิน หรืออีเมลผู้ดูแลเพื่อเข้าถึงหน้าตั้งค่าและตรวจสลิป
               </p>
             </div>
 
-            {/* Quick 1-Click Login with Current / Default Email */}
-            <div className="space-y-2">
-              <button
-                type="button"
-                onClick={() => handleQuickLoginEmail('kobkul.works00@gmail.com')}
-                className="w-full py-3 px-4 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-2 transition active:scale-95 shadow-sm touch-manipulation"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>เข้าสู่ระบบทันที: kobkul.works00@gmail.com</span>
-              </button>
+            <form onSubmit={handleSecureLogin} className="space-y-3">
+              {/* Clean Empty PIN input */}
+              <div>
+                <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                  รหัส PIN ผู้จัดก๊วน (Admin PIN)
+                </label>
+                <input
+                  type="password"
+                  placeholder="กรอกรหัส PIN (ค่าเริ่มต้น 1234)..."
+                  value={loginPinInput}
+                  onChange={(e) => setLoginPinInput(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 bg-neutral-50 focus:bg-white font-mono"
+                  autoFocus
+                />
+              </div>
 
-              <div className="relative my-3 text-center">
+              <div className="relative my-2 text-center">
                 <div className="absolute inset-0 flex items-center">
                   <div className="w-full border-t border-neutral-200"></div>
                 </div>
-                <span className="relative bg-white px-3 text-[11px] text-neutral-400 font-medium">
-                  หรือระบุอีเมลผู้จัดก๊วนอื่น
+                <span className="relative bg-white px-2 text-[10px] text-neutral-400 font-medium">
+                  หรือล็อกอินด้วยอีเมลผู้ดูแล
                 </span>
               </div>
 
-              {/* Custom email input */}
-              <div className="space-y-1.5">
+              {/* Clean Empty Email input (Zero pre-filled leak!) */}
+              <div>
+                <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                  อีเมล Google ของผู้ดูแล
+                </label>
                 <input
                   type="email"
                   placeholder="พิมพ์อีเมล Gmail ของคุณ..."
-                  value={customEmailInput}
-                  onChange={(e) => setCustomEmailInput(e.target.value)}
+                  value={loginEmailInput}
+                  onChange={(e) => setLoginEmailInput(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 text-xs text-neutral-900 focus:outline-none focus:border-neutral-900 bg-neutral-50 focus:bg-white"
                 />
-
-                {emailLoginError && (
-                  <p className="text-[11px] text-rose-600 font-semibold">{emailLoginError}</p>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => handleQuickLoginEmail(customEmailInput)}
-                  className="w-full py-2.5 rounded-xl bg-neutral-900 hover:bg-black text-white text-xs font-bold transition active:scale-95 touch-manipulation"
-                >
-                  เข้าสู่ระบบแอดมิน
-                </button>
               </div>
-            </div>
 
-            <button
-              type="button"
-              onClick={() => setIsGmailLoginModalOpen(false)}
-              className="w-full py-2 rounded-xl border border-neutral-200 text-xs font-medium text-neutral-500 hover:bg-neutral-50 transition"
-            >
-              ยกเลิก
-            </button>
+              {loginError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-[11px] text-rose-700 font-semibold flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="w-full py-2.5 rounded-xl bg-neutral-900 hover:bg-black text-white text-xs font-bold transition active:scale-95 touch-manipulation shadow-xs"
+              >
+                ยืนยันเข้าสู่ระบบ
+              </button>
+            </form>
+
+            <div className="space-y-2 pt-1 border-t border-neutral-100">
+              <button
+                type="button"
+                onClick={handleGoogleOAuthLogin}
+                className="w-full py-2.5 px-3 rounded-xl border border-neutral-200 hover:bg-neutral-50 text-xs font-semibold text-neutral-700 flex items-center justify-center gap-2 transition"
+              >
+                <span>เข้าสู่ระบบด้วยบัญชี Google</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIsLoginModalOpen(false);
+                  setLoginError(null);
+                  setLoginEmailInput('');
+                  setLoginPinInput('');
+                }}
+                className="w-full py-2 rounded-xl border border-transparent text-xs font-medium text-neutral-500 hover:text-neutral-800 transition"
+              >
+                ยกเลิก
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2063,7 +2320,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {/* Image Preview & Change button */}
                   <div className="relative rounded-2xl overflow-hidden border border-neutral-200 bg-neutral-900/5 max-h-56 flex items-center justify-center">
                     <img
                       src={slipFilePreview}
@@ -2096,7 +2352,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                           <span>ผลการตรวจสอบสลิปเบื้องต้น (Pre-Check System)</span>
                         </div>
 
-                        {/* Score badge */}
                         <span
                           className={`text-xs font-extrabold px-2 py-0.5 rounded-full font-mono border ${
                             slipVerificationData.status === 'passed'
@@ -2110,7 +2365,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                         </span>
                       </div>
 
-                      {/* Passed Checks list */}
                       <div className="space-y-1 text-[11px]">
                         {slipVerificationData.passedChecks.map((msg, i) => (
                           <div key={i} className="flex items-start gap-1.5 text-emerald-800">
@@ -2132,7 +2386,7 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                   {/* Note to admin */}
                   <div>
                     <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                      หมายเหตุการโอนเงิน (ไม่บังคับ เช่น โอนเวลา 18:05 หรือ บัญชีชื่อ ก...)
+                      หมายเหตุการโอนเงิน (ไม่บังคับ)
                     </label>
                     <input
                       type="text"
@@ -2206,7 +2460,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
             </div>
 
             <div className="overflow-y-auto flex-1 pr-1 space-y-3">
-              {/* High-res Image Preview */}
               <div className="rounded-2xl overflow-hidden border border-neutral-200 bg-neutral-900/5 max-h-72 flex items-center justify-center relative group">
                 <img
                   src={inspectingSlipParticipant.slipUrl}
@@ -2224,7 +2477,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </a>
               </div>
 
-              {/* Pre-Check Report Card */}
               {inspectingSlipParticipant.slipVerification && (
                 <div className="p-3.5 bg-neutral-50 border border-neutral-200 rounded-2xl space-y-2">
                   <div className="flex items-center justify-between">
@@ -2274,7 +2526,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </div>
               )}
 
-              {/* User Note */}
               {inspectingSlipParticipant.slipNote && (
                 <div className="p-3 bg-neutral-100/70 rounded-xl border border-neutral-200/80 text-xs">
                   <span className="font-semibold text-neutral-700 block mb-0.5">
@@ -2284,7 +2535,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 </div>
               )}
 
-              {/* Reject reason input form if triggered */}
               {isRejectingOpen && (
                 <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl space-y-2 animate-in fade-in">
                   <label className="block text-xs font-bold text-rose-900">
@@ -2386,7 +2636,6 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
                 เพื่อความเป็นธรรมในค่าหารสนามและค่าลูกแบดต่อสมาชิกท่านอื่น
               </p>
 
-              {/* Display Contact Info so member can call immediately */}
               {session.contactInfo?.phone ? (
                 <div className="p-3 bg-neutral-50 rounded-2xl border border-neutral-200/90 text-left space-y-1.5 text-xs">
                   <span className="font-semibold text-neutral-700 block">
@@ -2425,6 +2674,16 @@ export const MeetupGroupModal: React.FC<MeetupGroupModalProps> = ({
           </div>
         </div>
       )}
+    </div>
+  );
+
+  if (asEmbeddedView) {
+    return content;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/45 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      {content}
     </div>
   );
 };

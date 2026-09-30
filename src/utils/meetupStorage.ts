@@ -50,6 +50,7 @@ export const DEFAULT_MEETUP_SESSION: MeetupSession = {
   adminPin: '1234',
   status: 'open',
   notes: 'นำไม้แบดและรองเท้าแบดมินตันมาเอง ลูกแบด RSL Silver จัดเตรียมไว้ให้',
+  syncWithCourtQueue: false, // Default: separated / not auto-synced
   participants: [
     {
       id: 'p-1',

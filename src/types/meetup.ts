@@ -79,6 +79,7 @@ export interface MeetupSession {
   status: 'open' | 'full' | 'closed';
   notes: string;
   participants: MeetupParticipant[];
+  syncWithCourtQueue: boolean; // Admin setting: whether meetup syncs with SmashQueue court queue
   updatedAt: number;
   adminPin?: string; // e.g. "1234"
 }
